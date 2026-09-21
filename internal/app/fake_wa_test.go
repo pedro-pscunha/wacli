@@ -80,6 +80,12 @@ type fakeWA struct {
 	manualHistorySyncCalls      []bool
 	appStateRecoveries          []string
 	appStateFetches             []fakeAppStateFetch
+	appStateSnapshotFetches     []string
+	appStateSnapshot            []appstate.Mutation
+	appStateSnapshotErr         error
+	labelEditCalls              []fakeLabelEditCall
+	labelChatCalls              []fakeLabelChatCall
+	labelErr                    error
 
 	presenceCalls   []types.Presence
 	sendPresenceErr error
@@ -95,6 +101,19 @@ type fakeArchiveCall struct {
 type fakePinCall struct {
 	target types.JID
 	pin    bool
+}
+
+type fakeLabelEditCall struct {
+	labelID string
+	name    string
+	color   int32
+	deleted bool
+}
+
+type fakeLabelChatCall struct {
+	target  types.JID
+	labelID string
+	labeled bool
 }
 
 type fakeMuteCall struct {
@@ -810,6 +829,39 @@ func (f *fakeWA) FetchAppState(ctx context.Context, name string, fullSync, onlyI
 		}
 	}
 	return nil
+}
+
+func (f *fakeWA) EditLabel(ctx context.Context, labelID, name string, color int32, deleted bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.labelEditCalls = append(f.labelEditCalls, fakeLabelEditCall{
+		labelID: labelID,
+		name:    name,
+		color:   color,
+		deleted: deleted,
+	})
+	return f.labelErr
+}
+
+func (f *fakeWA) LabelChat(ctx context.Context, target types.JID, labelID string, labeled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.labelChatCalls = append(f.labelChatCalls, fakeLabelChatCall{
+		target:  target,
+		labelID: labelID,
+		labeled: labeled,
+	})
+	return f.labelErr
+}
+
+func (f *fakeWA) FetchAppStateSnapshotUnverified(ctx context.Context, name string) ([]appstate.Mutation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appStateSnapshotFetches = append(f.appStateSnapshotFetches, name)
+	if f.appStateSnapshotErr != nil {
+		return nil, f.appStateSnapshotErr
+	}
+	return f.appStateSnapshot, nil
 }
 
 func (f *fakeWA) FetchAppStateEvents(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) ([]any, error) {

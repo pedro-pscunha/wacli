@@ -62,6 +62,12 @@ type sendDelegateRequest struct {
 	PresenceState        string   `json:"presence_state,omitempty"`
 	PresenceMedia        string   `json:"presence_media,omitempty"`
 	Read                 *bool    `json:"read,omitempty"`
+	Enable               *bool    `json:"enable,omitempty"`
+	MuteDuration         string   `json:"mute_duration,omitempty"`
+	LabelID              string   `json:"label_id,omitempty"`
+	LabelName            string   `json:"label_name,omitempty"`
+	LabelColor           int32    `json:"label_color,omitempty"`
+	LabelDeleted         bool     `json:"label_deleted,omitempty"`
 	PostSendWaitMS       int64    `json:"post_send_wait_ms,omitempty"`
 	TimeoutMS            int64    `json:"timeout_ms,omitempty"`
 	DeadlineUnixMS       int64    `json:"deadline_unix_ms,omitempty"`
@@ -306,6 +312,16 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 		return executeDelegatedEdit(ctx, a, req)
 	case "mark_read":
 		return executeDelegatedMarkRead(ctx, a, req)
+	case "archive":
+		return executeDelegatedArchive(ctx, a, req)
+	case "pin":
+		return executeDelegatedPin(ctx, a, req)
+	case "mute":
+		return executeDelegatedMute(ctx, a, req)
+	case "label_chat":
+		return executeDelegatedLabelChat(ctx, a, req)
+	case "label_edit":
+		return executeDelegatedLabelEdit(ctx, a, req)
 	default:
 		return sendDelegateResponse{}, fmt.Errorf("unsupported send kind %q", req.Kind)
 	}
@@ -333,6 +349,123 @@ func executeDelegatedMarkRead(ctx context.Context, a delegatedMarkReadApp, req s
 		action = "mark-unread"
 	}
 	return sendDelegateResponse{OK: true, Chat: toJID.String(), Action: action}, nil
+}
+
+// Archive, pin and mute are app state writes on the healthy regular_low and
+// regular_high collections, exactly like mark_read. Delegating them to the
+// daemon removes the stop-command-start ritual for the whole chat-flag set.
+type delegatedChatFlagApp interface {
+	recipientResolverApp
+	ArchiveChat(context.Context, types.JID, bool) error
+	PinChat(context.Context, types.JID, bool) error
+	MuteChat(context.Context, types.JID, bool, time.Duration) error
+}
+
+// delegatedChatFlagTarget resolves the chat and the on/off state shared by the
+// three chat-flag kinds. Enable defaults to true so an absent field means "set".
+func delegatedChatFlagTarget(a recipientResolverApp, req sendDelegateRequest) (types.JID, bool, error) {
+	toJID, err := resolveRecipient(a, req.To, recipientOptions{pick: req.Pick, asJSON: true})
+	if err != nil {
+		return types.JID{}, false, err
+	}
+	enable := true
+	if req.Enable != nil {
+		enable = *req.Enable
+	}
+	return toJID, enable, nil
+}
+
+func executeDelegatedArchive(ctx context.Context, a delegatedChatFlagApp, req sendDelegateRequest) (sendDelegateResponse, error) {
+	toJID, enable, err := delegatedChatFlagTarget(a, req)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	if err := a.ArchiveChat(ctx, toJID, enable); err != nil {
+		return sendDelegateResponse{}, err
+	}
+	action := "archive"
+	if !enable {
+		action = "unarchive"
+	}
+	return sendDelegateResponse{OK: true, Chat: toJID.String(), Action: action}, nil
+}
+
+func executeDelegatedPin(ctx context.Context, a delegatedChatFlagApp, req sendDelegateRequest) (sendDelegateResponse, error) {
+	toJID, enable, err := delegatedChatFlagTarget(a, req)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	if err := a.PinChat(ctx, toJID, enable); err != nil {
+		return sendDelegateResponse{}, err
+	}
+	action := "pin"
+	if !enable {
+		action = "unpin"
+	}
+	return sendDelegateResponse{OK: true, Chat: toJID.String(), Action: action}, nil
+}
+
+func executeDelegatedMute(ctx context.Context, a delegatedChatFlagApp, req sendDelegateRequest) (sendDelegateResponse, error) {
+	toJID, enable, err := delegatedChatFlagTarget(a, req)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	var duration time.Duration
+	if req.MuteDuration != "" {
+		duration, err = time.ParseDuration(req.MuteDuration)
+		if err != nil {
+			return sendDelegateResponse{}, fmt.Errorf("parse mute duration %q: %w", req.MuteDuration, err)
+		}
+	}
+	if err := a.MuteChat(ctx, toJID, enable, duration); err != nil {
+		return sendDelegateResponse{}, err
+	}
+	action := "mute"
+	if !enable {
+		action = "unmute"
+	}
+	return sendDelegateResponse{OK: true, Chat: toJID.String(), Action: action}, nil
+}
+
+// Labels take the same pre-write sync as the chat flags inside App.LabelChat
+// and App.EditLabel, so a lagging regular version is repaired from a
+// primary-device snapshot before the send instead of failing with a 409.
+type delegatedLabelApp interface {
+	recipientResolverApp
+	LabelChat(context.Context, types.JID, string, bool) error
+	EditLabel(context.Context, string, string, int32, bool) error
+}
+
+func executeDelegatedLabelChat(ctx context.Context, a delegatedLabelApp, req sendDelegateRequest) (sendDelegateResponse, error) {
+	if req.LabelID == "" {
+		return sendDelegateResponse{}, fmt.Errorf("label id is required")
+	}
+	toJID, labeled, err := delegatedChatFlagTarget(a, req)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	if err := a.LabelChat(ctx, toJID, req.LabelID, labeled); err != nil {
+		return sendDelegateResponse{}, err
+	}
+	action := "attach"
+	if !labeled {
+		action = "detach"
+	}
+	return sendDelegateResponse{OK: true, Chat: toJID.String(), Target: toJID.String(), Action: action}, nil
+}
+
+func executeDelegatedLabelEdit(ctx context.Context, a delegatedLabelApp, req sendDelegateRequest) (sendDelegateResponse, error) {
+	if req.LabelID == "" {
+		return sendDelegateResponse{}, fmt.Errorf("label id is required")
+	}
+	if err := a.EditLabel(ctx, req.LabelID, req.LabelName, req.LabelColor, req.LabelDeleted); err != nil {
+		return sendDelegateResponse{}, err
+	}
+	action := "edit"
+	if req.LabelDeleted {
+		action = "delete"
+	}
+	return sendDelegateResponse{OK: true, Target: req.LabelID, Action: action}, nil
 }
 
 func executeDelegatedPresence(ctx context.Context, a *app.App, req sendDelegateRequest) (sendDelegateResponse, error) {

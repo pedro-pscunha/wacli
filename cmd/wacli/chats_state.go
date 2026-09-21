@@ -28,9 +28,10 @@ func newChatsArchiveCmd(flags *rootFlags, archive bool) *cobra.Command {
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runChatState(flags, opts, use, nil, func(ctx context.Context, a chatStateApp, jid types.JID) error {
-				return a.ArchiveChat(ctx, jid, archive)
-			})
+			return runChatState(flags, opts, use, &sendDelegateRequest{Kind: "archive", Enable: &archive},
+				func(ctx context.Context, a chatStateApp, jid types.JID) error {
+					return a.ArchiveChat(ctx, jid, archive)
+				})
 		},
 	}
 	addChatStateFlags(cmd, &opts)
@@ -47,9 +48,10 @@ func newChatsPinCmd(flags *rootFlags, pin bool) *cobra.Command {
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runChatState(flags, opts, use, nil, func(ctx context.Context, a chatStateApp, jid types.JID) error {
-				return a.PinChat(ctx, jid, pin)
-			})
+			return runChatState(flags, opts, use, &sendDelegateRequest{Kind: "pin", Enable: &pin},
+				func(ctx context.Context, a chatStateApp, jid types.JID) error {
+					return a.PinChat(ctx, jid, pin)
+				})
 		},
 	}
 	addChatStateFlags(cmd, &opts)
@@ -63,9 +65,12 @@ func newChatsMuteCmd(flags *rootFlags) *cobra.Command {
 		Use:   "mute",
 		Short: "Mute a chat",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runChatState(flags, opts, "mute", nil, func(ctx context.Context, a chatStateApp, jid types.JID) error {
-				return a.MuteChat(ctx, jid, true, duration)
-			})
+			muteOn := true
+			return runChatState(flags, opts, "mute",
+				&sendDelegateRequest{Kind: "mute", Enable: &muteOn, MuteDuration: duration.String()},
+				func(ctx context.Context, a chatStateApp, jid types.JID) error {
+					return a.MuteChat(ctx, jid, true, duration)
+				})
 		},
 	}
 	addChatStateFlags(cmd, &opts)
@@ -79,9 +84,11 @@ func newChatsUnmuteCmd(flags *rootFlags) *cobra.Command {
 		Use:   "unmute",
 		Short: "Unmute a chat",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runChatState(flags, opts, "unmute", nil, func(ctx context.Context, a chatStateApp, jid types.JID) error {
-				return a.MuteChat(ctx, jid, false, 0)
-			})
+			muteOff := false
+			return runChatState(flags, opts, "unmute", &sendDelegateRequest{Kind: "mute", Enable: &muteOff},
+				func(ctx context.Context, a chatStateApp, jid types.JID) error {
+					return a.MuteChat(ctx, jid, false, 0)
+				})
 		},
 	}
 	addChatStateFlags(cmd, &opts)
@@ -98,9 +105,10 @@ func newChatsMarkReadCmd(flags *rootFlags, read bool) *cobra.Command {
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runChatState(flags, opts, use, &read, func(ctx context.Context, a chatStateApp, jid types.JID) error {
-				return a.MarkChatRead(ctx, jid, read)
-			})
+			return runChatState(flags, opts, use, &sendDelegateRequest{Kind: "mark_read", Read: &read},
+				func(ctx context.Context, a chatStateApp, jid types.JID) error {
+					return a.MarkChatRead(ctx, jid, read)
+				})
 		},
 	}
 	addChatStateFlags(cmd, &opts)
@@ -114,7 +122,10 @@ type chatStateApp interface {
 	MarkChatRead(context.Context, types.JID, bool) error
 }
 
-func runChatState(flags *rootFlags, opts chatStateOptions, action string, delegateRead *bool, run func(context.Context, chatStateApp, types.JID) error) error {
+// runChatState takes the delegate request the command wants performed when the
+// sync daemon holds the store lock. A nil delegate keeps today's behavior of
+// failing with the lock error.
+func runChatState(flags *rootFlags, opts chatStateOptions, action string, delegate *sendDelegateRequest, run func(context.Context, chatStateApp, types.JID) error) error {
 	if strings.TrimSpace(opts.chat) == "" {
 		return fmt.Errorf("--chat is required")
 	}
@@ -127,13 +138,11 @@ func runChatState(flags *rootFlags, opts chatStateOptions, action string, delega
 
 	a, lk, err := newApp(ctx, flags, true, false)
 	if err != nil {
-		if delegateRead != nil {
-			resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
-				Kind: "mark_read",
-				To:   opts.chat,
-				Pick: opts.pick,
-				Read: delegateRead,
-			})
+		if delegate != nil {
+			req := *delegate
+			req.To = opts.chat
+			req.Pick = opts.pick
+			resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, req)
 			if delegated {
 				if delegateErr != nil {
 					return delegateErr

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Labels: add `labels list|create|rename|delete|attach|detach`, delegate writes through the running sync daemon, key DM memberships on the LID, and merge phone/LID forms when listing.
+- Sync: on an LTHash mismatch request the phone recovery snapshot first and fall back to a full refresh, raise each repair step's timeout to 2 minutes, and admit a new repair after every successful one instead of once per run. Stop forcing a full refresh of `regular` on connect. Label writes run the chat-state pre-write sync so a lagging `regular` version no longer fails with a 409 conflict.
+
 ## 0.18.3 - 2026-09-21
 
 **Highlights:** webhooks omit media keys, backfill follows verified phone/LID identities, and sync recovery survives interruptions.

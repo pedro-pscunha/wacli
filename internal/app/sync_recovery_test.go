@@ -42,42 +42,42 @@ func (f *appStateContextWA) RequestAppStateRecovery(ctx context.Context, name st
 	return f.requestAppStateRecovery(ctx, name)
 }
 
-func TestAppStateLTHashMismatchRecoveryGetsFreshTimeoutAfterFullSyncExpires(t *testing.T) {
+func TestAppStateLTHashMismatchFullSyncGetsFreshTimeoutAfterSnapshotExpires(t *testing.T) {
 	a := newTestApp(t)
 	var fetchErr error
 	var recoveryErr error
-	recoveryHasDeadline := false
-	recoveryCalls := 0
+	fetchHasDeadline := false
+	fetchCalls := 0
 	f := &appStateContextWA{fakeWA: newFakeWA()}
-	f.fetchAppState = func(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) error {
-		<-ctx.Done()
-		fetchErr = ctx.Err()
-		return fetchErr
-	}
 	f.requestAppStateRecovery = func(ctx context.Context, name string) (types.MessageID, error) {
-		recoveryCalls++
+		<-ctx.Done()
 		recoveryErr = ctx.Err()
-		_, recoveryHasDeadline = ctx.Deadline()
-		return types.MessageID("recovery-req"), recoveryErr
+		return "", recoveryErr
+	}
+	f.fetchAppState = func(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) error {
+		fetchCalls++
+		fetchErr = ctx.Err()
+		_, fetchHasDeadline = ctx.Deadline()
+		return fetchErr
 	}
 	a.wa = f
 
 	var recoveries sync.Map
 	name := string(appstate.WAPatchRegularLow)
 	recoveries.Store(name, struct{}{})
-	a.recoverAppStateCollection(t.Context(), name, &recoveries, 10*time.Millisecond)
+	a.recoverAppStateCollection(t.Context(), name, &recoveries, 10*time.Millisecond, true)
 
-	if !errors.Is(fetchErr, context.DeadlineExceeded) {
-		t.Fatalf("full sync context error = %v, want deadline exceeded", fetchErr)
+	if !errors.Is(recoveryErr, context.DeadlineExceeded) {
+		t.Fatalf("snapshot context error = %v, want deadline exceeded", recoveryErr)
 	}
-	if recoveryCalls != 1 {
-		t.Fatalf("recovery calls = %d, want 1", recoveryCalls)
+	if fetchCalls != 1 {
+		t.Fatalf("full sync calls = %d, want 1", fetchCalls)
 	}
-	if recoveryErr != nil {
-		t.Fatalf("recovery context was already expired: %v", recoveryErr)
+	if fetchErr != nil {
+		t.Fatalf("full sync context was already expired: %v", fetchErr)
 	}
-	if !recoveryHasDeadline {
-		t.Fatal("recovery context has no timeout")
+	if !fetchHasDeadline {
+		t.Fatal("full sync context has no timeout")
 	}
 }
 
@@ -87,8 +87,10 @@ func TestAppStateLTHashMismatchRecoveryRetainsParentCancellation(t *testing.T) {
 	defer cancelParent()
 	recoveryStarted := make(chan struct{})
 	var recoveryErr error
+	var fetchCalls atomic.Int32
 	f := &appStateContextWA{fakeWA: newFakeWA()}
 	f.fetchAppState = func(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) error {
+		fetchCalls.Add(1)
 		return errors.New("full sync failed")
 	}
 	f.requestAppStateRecovery = func(ctx context.Context, name string) (types.MessageID, error) {
@@ -104,13 +106,13 @@ func TestAppStateLTHashMismatchRecoveryRetainsParentCancellation(t *testing.T) {
 	recoveries.Store(name, struct{}{})
 	done := make(chan struct{})
 	go func() {
-		a.recoverAppStateCollection(parentCtx, name, &recoveries, 100*time.Millisecond)
+		a.recoverAppStateCollection(parentCtx, name, &recoveries, 100*time.Millisecond, true)
 		close(done)
 	}()
 	select {
 	case <-recoveryStarted:
 	case <-time.After(time.Second):
-		t.Fatal("app state recovery fallback did not start")
+		t.Fatal("app state snapshot recovery did not start")
 	}
 	cancelParent()
 	select {
@@ -122,50 +124,24 @@ func TestAppStateLTHashMismatchRecoveryRetainsParentCancellation(t *testing.T) {
 	if !errors.Is(recoveryErr, context.Canceled) {
 		t.Fatalf("recovery context error = %v, want parent cancellation", recoveryErr)
 	}
+	if got := fetchCalls.Load(); got != 0 {
+		t.Fatalf("full sync fallback ran %d times after parent cancellation", got)
+	}
 	if _, loaded := recoveries.Load(name); loaded {
 		t.Fatal("recovery guard remained set after parent cancellation")
 	}
 }
 
-func TestAppStateLTHashMismatchAttemptsFullSyncFirst(t *testing.T) {
+func TestAppStateLTHashMismatchRequestsSnapshotFirst(t *testing.T) {
 	a := newTestApp(t)
 	f := newFakeWA()
+	f.onAppStateRecovery = func(name string) {
+		f.emit(&events.AppStateSyncComplete{Name: appstate.WAPatchName(name), Recovery: true})
+	}
 	a.wa = f
 
 	var recoveries sync.Map
 	err := fmt.Errorf("failed to verify patch v5848: %w", appstate.ErrMismatchingLTHash)
-	a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
-		Name:  appstate.WAPatchRegularLow,
-		Error: err,
-	}, &recoveries)
-
-	waitForCondition(t, time.Second, func() bool {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return len(f.appStateFetches) == 1
-	})
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if got := f.appStateFetches[0]; got.name != string(appstate.WAPatchRegularLow) || !got.fullSync {
-		t.Fatalf("unexpected fetch = %+v", got)
-	}
-	if len(f.appStateRecoveries) != 0 {
-		t.Fatalf("recovery requested when full sync succeeded: %v", f.appStateRecoveries)
-	}
-}
-
-func TestAppStateLTHashMismatchRequestsRecoveryWhenFullSyncFails(t *testing.T) {
-	a := newTestApp(t)
-	f := newFakeWA()
-	a.wa = f
-	f.appStateFetchErr = appstate.ErrMismatchingLTHash
-
-	var recoveries sync.Map
-	err := fmt.Errorf("failed to verify patch v5848: %w", appstate.ErrMismatchingLTHash)
-	a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
-		Name:  appstate.WAPatchRegularLow,
-		Error: err,
-	}, &recoveries)
 	a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
 		Name:  appstate.WAPatchRegularLow,
 		Error: err,
@@ -176,10 +152,57 @@ func TestAppStateLTHashMismatchRequestsRecoveryWhenFullSyncFails(t *testing.T) {
 		defer f.mu.Unlock()
 		return len(f.appStateRecoveries) == 1
 	})
+	a.appStateRecoveryWorkers.Wait()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if got := f.appStateRecoveries[0]; got != string(appstate.WAPatchRegularLow) {
 		t.Fatalf("recovery collection = %q", got)
+	}
+	if len(f.appStateFetches) != 0 {
+		t.Fatalf("full sync ran when the snapshot succeeded: %+v", f.appStateFetches)
+	}
+}
+
+func TestAppStateLTHashMismatchFallsBackToFullSyncWhenSnapshotFails(t *testing.T) {
+	a := newTestApp(t)
+	var recoveryCalls atomic.Int32
+	f := &appStateContextWA{fakeWA: newFakeWA()}
+	f.requestAppStateRecovery = func(context.Context, string) (types.MessageID, error) {
+		recoveryCalls.Add(1)
+		return "", errors.New("phone offline")
+	}
+	f.fetchAppState = func(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) error {
+		f.fakeWA.mu.Lock()
+		defer f.fakeWA.mu.Unlock()
+		f.appStateFetches = append(f.appStateFetches, fakeAppStateFetch{name: name, fullSync: fullSync, onlyIfNotSynced: onlyIfNotSynced})
+		return nil
+	}
+	a.wa = f
+
+	var recoveries sync.Map
+	err := fmt.Errorf("failed to verify patch v5848: %w", appstate.ErrMismatchingLTHash)
+	a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
+		Name:  appstate.WAPatchRegularLow,
+		Error: err,
+	}, &recoveries)
+	a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
+		Name:  appstate.WAPatchRegularLow,
+		Error: err,
+	}, &recoveries)
+
+	waitForCondition(t, time.Second, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.appStateFetches) == 1
+	})
+	a.appStateRecoveryWorkers.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := f.appStateFetches[0]; got.name != string(appstate.WAPatchRegularLow) || !got.fullSync {
+		t.Fatalf("fallback fetch = %+v, want regular_low full sync", got)
+	}
+	if got := recoveryCalls.Load(); got != 1 {
+		t.Fatalf("snapshot requests = %d, want 1 for two overlapping mismatches", got)
 	}
 }
 
@@ -201,36 +224,39 @@ func TestAppStateLTHashMismatchThrottlesAfterRecoveryFailure(t *testing.T) {
 	var recoveries sync.Map
 	name := string(appstate.WAPatchRegularLow)
 	recoveries.Store(name, struct{}{})
-	a.recoverAppStateCollection(t.Context(), name, &recoveries, time.Second)
+	a.recoverAppStateCollection(t.Context(), name, &recoveries, time.Second, true)
 
-	if _, loaded := recoveries.Load(name); !loaded {
-		t.Fatal("recovery guard was cleared after recovery request failure")
+	if _, loaded := recoveries.Load(name); loaded {
+		t.Fatal("in-flight guard remained set after the sequence finished")
 	}
 	err := fmt.Errorf("failed to verify patch v5848: %w", appstate.ErrMismatchingLTHash)
 	a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
 		Name:  appstate.WAPatchRegularLow,
 		Error: err,
 	}, &recoveries)
-	time.Sleep(20 * time.Millisecond)
+	a.appStateRecoveryWorkers.Wait()
 
 	if got := fetchCalls.Load(); got != 1 {
-		t.Fatalf("full sync calls = %d, want 1", got)
+		t.Fatalf("full sync calls = %d, want 1: a failed sequence must defer the next one", got)
 	}
 	if got := recoveryCalls.Load(); got != 1 {
-		t.Fatalf("recovery calls = %d, want 1", got)
+		t.Fatalf("recovery calls = %d, want 1: a failed sequence must defer the next one", got)
 	}
 }
 
-func TestAppStateLTHashMismatchCapsFullAndSnapshotRequests(t *testing.T) {
+func TestAppStateLTHashMismatchAdmitsNextRepairAfterSuccess(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		fetchError    error
-		recoveryError error
-		wantSnapshots int32
+		name           string
+		fetchError     error
+		recoveryError  error
+		wantSnapshots  int32
+		wantFetches    int32
+		wantRepeat     bool
+		wantIntentLeft bool
 	}{
-		{name: "full-success"},
-		{name: "snapshot-success", fetchError: errors.New("full sync failed"), wantSnapshots: 1},
-		{name: "snapshot-failure", fetchError: errors.New("full sync failed"), recoveryError: errors.New("recovery request failed"), wantSnapshots: 1},
+		{name: "snapshot-success", wantSnapshots: 1, wantFetches: 0, wantRepeat: true},
+		{name: "snapshot-failure-full-success", recoveryError: errors.New("phone offline"), wantSnapshots: 1, wantFetches: 1, wantRepeat: true},
+		{name: "both-fail", recoveryError: errors.New("phone offline"), fetchError: errors.New("full sync failed"), wantSnapshots: 1, wantFetches: 1, wantIntentLeft: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newTestApp(t)
@@ -251,24 +277,32 @@ func TestAppStateLTHashMismatchCapsFullAndSnapshotRequests(t *testing.T) {
 			var recoveries sync.Map
 			collection := string(appstate.WAPatchRegularLow)
 			recoveries.Store(collection, struct{}{})
-			a.recoverAppStateCollection(t.Context(), collection, &recoveries, time.Second)
-			if _, retained := recoveries.Load(collection); !retained {
-				t.Fatal("recovery sequence did not retain its per-run budget")
+			a.recoverAppStateCollection(t.Context(), collection, &recoveries, time.Second, true)
+			if _, retained := recoveries.Load(collection); retained {
+				t.Fatal("finished sequence left its in-flight guard set")
 			}
-			for range 10 {
-				a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
-					Name: appstate.WAPatchRegularLow, Error: appstate.ErrMismatchingLTHash,
-				}, &recoveries)
-			}
-			if got := fetches.Load(); got != 1 {
-				t.Fatalf("full sync calls = %d, want 1", got)
+			if got := fetches.Load(); got != tc.wantFetches {
+				t.Fatalf("full sync calls = %d, want %d", got, tc.wantFetches)
 			}
 			if got := snapshots.Load(); got != tc.wantSnapshots {
 				t.Fatalf("snapshot calls = %d, want %d", got, tc.wantSnapshots)
 			}
 			required, err := a.db.AppStateRecoveryRequired(collection)
-			if err != nil || required != (tc.recoveryError != nil) {
-				t.Fatalf("recovery intent = %v, %v; recovery error %v", required, err, tc.recoveryError)
+			if err != nil || required != tc.wantIntentLeft {
+				t.Fatalf("recovery intent = %v, %v; want %v", required, err, tc.wantIntentLeft)
+			}
+
+			// The next mismatch is admitted only after a successful repair.
+			a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{
+				Name: appstate.WAPatchRegularLow, Error: appstate.ErrMismatchingLTHash,
+			}, &recoveries)
+			a.appStateRecoveryWorkers.Wait()
+			wantSnapshots := tc.wantSnapshots
+			if tc.wantRepeat {
+				wantSnapshots *= 2
+			}
+			if got := snapshots.Load(); got != wantSnapshots {
+				t.Fatalf("snapshot calls after second mismatch = %d, want %d", got, wantSnapshots)
 			}
 		})
 	}
@@ -312,7 +346,7 @@ func TestAppStateFullRefreshRecordsIntentBeforeCursorAdvance(t *testing.T) {
 	a.wa = f
 	var recoveries sync.Map
 	recoveries.Store(string(appstate.WAPatchRegularLow), struct{}{})
-	a.recoverAppStateCollection(t.Context(), string(appstate.WAPatchRegularLow), &recoveries, time.Second)
+	a.recoverAppStateCollection(t.Context(), string(appstate.WAPatchRegularLow), &recoveries, time.Second, false)
 	if !called {
 		t.Fatal("full-fetch callback was not called")
 	}
@@ -349,7 +383,7 @@ func TestFailedAppStateReplayPersistsIntentAndRecoversAtStartup(t *testing.T) {
 	var budget sync.Map
 	name := string(appstate.WAPatchRegularLow)
 	budget.Store(name, struct{}{})
-	a.recoverAppStateCollection(t.Context(), name, &budget, time.Second)
+	a.recoverAppStateCollection(t.Context(), name, &budget, time.Second, false)
 	if required, err := a.db.AppStateRecoveryRequired(name); err != nil || !required {
 		t.Fatalf("failed replay intent = %v, %v; want true", required, err)
 	}
@@ -440,6 +474,11 @@ func TestCloseWaitsForAppStateRecoveryPersistence(t *testing.T) {
 		defer a.Close()
 		defer releaseOnce.Do(func() { close(release) })
 		f := &recoveryCloseWA{appStateContextWA: &appStateContextWA{fakeWA: newFakeWA()}, disconnected: make(chan struct{})}
+		// Fail the snapshot step so the sequence reaches the full replay, whose
+		// persistence this test holds open.
+		f.requestAppStateRecovery = func(context.Context, string) (types.MessageID, error) {
+			return "", errors.New("phone offline")
+		}
 		f.fetchEvents = func(context.Context, string, bool, bool) ([]any, error) {
 			close(started)
 			<-release
