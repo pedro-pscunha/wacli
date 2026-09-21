@@ -15,6 +15,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -415,6 +416,78 @@ func (c *Client) FetchAppState(ctx context.Context, name string, fullSync, onlyI
 		return fmt.Errorf("app state collection name is required")
 	}
 	return cli.FetchAppState(ctx, appstate.WAPatchName(name), fullSync, onlyIfNotSynced)
+}
+
+// FetchAppStateSnapshotUnverified downloads one collection's full snapshot and
+// decodes it without MAC validation, returning the raw mutations.
+//
+// A collection whose server-side patch history carries an LTHash mismatch
+// cannot be read any other way: both the normal sync and the recovery snapshot
+// fail during verification, before a single mutation is returned. Skipping
+// validation trades the integrity check for readability, so callers must treat
+// the result as untrusted input and must not write it back as canonical state.
+//
+// The call writes NOTHING to the session store: it decodes through a device
+// whose app state writes are dropped (see readOnlyAppStateStore below), so it
+// advances no version and inserts no mutation MACs. That matters because the
+// alternative — a real full sync of a mismatching collection — leaves the local
+// version unable to match the server head, and the next write to that
+// collection then fails with a 409 conflict.
+func (c *Client) FetchAppStateSnapshotUnverified(ctx context.Context, name string) ([]appstate.Mutation, error) {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil || !cli.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+	patchName := appstate.WAPatchName(strings.TrimSpace(name))
+	if patchName == "" {
+		return nil, fmt.Errorf("app state collection name is required")
+	}
+	list, err := cli.DangerousInternals().FetchAppStatePatches(ctx, patchName, 0, true)
+	if err != nil {
+		return nil, fmt.Errorf("fetch app state %s snapshot: %w", patchName, err)
+	}
+	// Decoding writes mutation MACs and a version by default. Read through a
+	// device whose app state writes are dropped, so this read cannot touch the
+	// session store, and so re-reading a snapshot cannot trip the MAC table's
+	// unique constraint.
+	readOnlyDevice := *cli.Store
+	readOnlyDevice.AppState = readOnlyAppStateStore{inner: cli.Store.AppState}
+	proc := appstate.NewProcessor(&readOnlyDevice, newWhatsmeowLogger("AppStateRead", "ERROR", os.Stderr))
+	mutations, _, err := proc.DecodePatches(ctx, list, appstate.HashState{}, false)
+	if err != nil {
+		return nil, fmt.Errorf("decode app state %s snapshot: %w", patchName, err)
+	}
+	return mutations, nil
+}
+
+// readOnlyAppStateStore passes reads through and drops every write, so an app
+// state decode can run without mutating the session store.
+type readOnlyAppStateStore struct {
+	inner store.AppStateStore
+}
+
+func (r readOnlyAppStateStore) PutAppStateVersion(context.Context, string, uint64, [128]byte) error {
+	return nil
+}
+
+func (r readOnlyAppStateStore) GetAppStateVersion(ctx context.Context, name string) (uint64, [128]byte, error) {
+	return r.inner.GetAppStateVersion(ctx, name)
+}
+
+func (r readOnlyAppStateStore) DeleteAppStateVersion(context.Context, string) error { return nil }
+
+func (r readOnlyAppStateStore) PutAppStateMutationMACs(context.Context, string, uint64, []store.AppStateMutationMAC) error {
+	return nil
+}
+
+func (r readOnlyAppStateStore) DeleteAppStateMutationMACs(context.Context, string, [][]byte) error {
+	return nil
+}
+
+func (r readOnlyAppStateStore) GetAppStateMutationMAC(ctx context.Context, name string, indexMAC []byte) ([]byte, error) {
+	return r.inner.GetAppStateMutationMAC(ctx, name, indexMAC)
 }
 
 // FetchAppStateEvents fetches one collection without globally dispatching the

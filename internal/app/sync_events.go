@@ -348,6 +348,8 @@ func appStateCollectionsForEvent(evt any) []appstate.WAPatchName {
 		return []appstate.WAPatchName{appstate.WAPatchRegularLow}
 	case *events.Mute, *events.Star, *events.DeleteForMe:
 		return []appstate.WAPatchName{appstate.WAPatchRegularHigh}
+	case *events.LabelEdit, *events.LabelAssociationChat, *events.LabelAssociationMessage:
+		return []appstate.WAPatchName{appstate.WAPatchRegular}
 	case *events.AppState:
 		if v == nil || v.SyncActionValue == nil || (v.GetCallLogAction() == nil && v.GetDeleteIndividualCallLog() == nil) {
 			return nil
