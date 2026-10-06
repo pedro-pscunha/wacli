@@ -739,7 +739,7 @@ func TestSyncFetchesChatAppStateDeltasAfterConnect(t *testing.T) {
 			}
 		}
 		if name == string(appstate.WAPatchRegular) {
-			if !fullSync {
+			if fullSync {
 				return nil
 			}
 			return &events.AppState{
@@ -787,8 +787,8 @@ func TestSyncFetchesChatAppStateDeltasAfterConnect(t *testing.T) {
 	if fetches[1].name != string(appstate.WAPatchRegularLow) || fetches[1].fullSync || fetches[1].onlyIfNotSynced {
 		t.Fatalf("second app state fetch = %+v", fetches[1])
 	}
-	if fetches[2].name != string(appstate.WAPatchRegular) || !fetches[2].fullSync || fetches[2].onlyIfNotSynced {
-		t.Fatalf("third app state fetch = %+v", fetches[2])
+	if fetches[2].name != string(appstate.WAPatchRegular) || fetches[2].fullSync || fetches[2].onlyIfNotSynced {
+		t.Fatalf("third app state fetch = %+v, want an incremental regular fetch: a forced full sync deletes the version row first", fetches[2])
 	}
 	msg, err := a.db.GetMessage(chat.String(), "m-offline-delete-for-me")
 	if err != nil {
@@ -1081,6 +1081,9 @@ func TestMuteChatRecoversRegularHighBeforeWrite(t *testing.T) {
 				fmt.Errorf("failed to verify regular_high patch: %w", appstate.ErrMismatchingLTHash),
 				nil,
 			}
+			// The snapshot comes first; a phone that refuses it sends the
+			// write down the full-replay fallback this test covers.
+			f.appStateRecoveryErr = errors.New("phone offline")
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if err := a.MuteChat(ctx, chat, tc.mute, 0); err != nil {
@@ -2036,6 +2039,9 @@ func TestArchiveChatWaitsForFullReplayPersistence(t *testing.T) {
 		fmt.Errorf("failed to verify regular_low patch: %w", appstate.ErrMismatchingLTHash),
 		nil,
 	}
+	// The snapshot comes first; a phone that refuses it sends the write down
+	// the full-replay fallback whose persistence this test holds open.
+	f.appStateRecoveryErr = errors.New("phone offline")
 	replayStarted := make(chan struct{})
 	releaseReplay := make(chan struct{})
 	f.appStateFetchEvent = func(name string, fullSync, onlyIfNotSynced bool) any {
@@ -2121,6 +2127,9 @@ func TestArchiveChatReplaysAfterRecoveryPersistenceFailure(t *testing.T) {
 		fmt.Errorf("failed to verify regular_low patch: %w", appstate.ErrMismatchingLTHash),
 		nil,
 	}
+	// The snapshot comes first; a phone that refuses it sends the write down
+	// the full replay whose persistence this test breaks.
+	f.appStateRecoveryErr = errors.New("phone offline")
 	f.appStateFetchEvent = func(name string, fullSync, onlyIfNotSynced bool) any {
 		if !fullSync {
 			return nil
@@ -2261,7 +2270,7 @@ func TestArchiveChatMarksReplayAfterDeltaPersistenceFailure(t *testing.T) {
 	}
 }
 
-func TestArchiveChatUsesSynchronousFullReplayForMismatch(t *testing.T) {
+func TestArchiveChatRequestsSnapshotBeforeFullReplayForMismatch(t *testing.T) {
 	a := newTestApp(t)
 	f := newFakeWA()
 	a.wa = f
@@ -2274,7 +2283,9 @@ func TestArchiveChatUsesSynchronousFullReplayForMismatch(t *testing.T) {
 	defer f.RemoveEventHandler(handlerID)
 	f.appStateFetchErrs = []error{
 		fmt.Errorf("failed to verify regular_low patch: %w", appstate.ErrMismatchingLTHash),
-		nil,
+	}
+	f.onAppStateRecovery = func(name string) {
+		f.emit(&events.AppStateSyncComplete{Name: appstate.WAPatchName(name), Recovery: true})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2287,17 +2298,14 @@ func TestArchiveChatUsesSynchronousFullReplayForMismatch(t *testing.T) {
 	archiveCalls := len(f.archiveCalls)
 	legacyRecoveries := append([]string(nil), f.appStateRecoveries...)
 	f.mu.Unlock()
-	if len(fetches) != 2 {
-		t.Fatalf("app state fetches = %+v, want delta then synchronous full replay", fetches)
-	}
-	if fetch := fetches[1]; fetch.name != string(appstate.WAPatchRegularLow) || !fetch.fullSync || fetch.onlyIfNotSynced {
-		t.Fatalf("recovery fetch = %+v, want regular_low full replay", fetch)
+	if len(fetches) != 1 || fetches[0].fullSync {
+		t.Fatalf("app state fetches = %+v, want the delta only: the snapshot repairs the mismatch, not a full replay", fetches)
 	}
 	if archiveCalls != 1 {
-		t.Fatalf("archive calls = %d, want 1 after full replay", archiveCalls)
+		t.Fatalf("archive calls = %d, want 1 after the snapshot", archiveCalls)
 	}
-	if len(legacyRecoveries) != 0 {
-		t.Fatalf("legacy async recoveries = %v, want synchronous replay only", legacyRecoveries)
+	if len(legacyRecoveries) != 1 || legacyRecoveries[0] != string(appstate.WAPatchRegularLow) {
+		t.Fatalf("recoveries = %v, want exactly one synchronous regular_low snapshot", legacyRecoveries)
 	}
 	required, err := a.db.AppStateRecoveryRequired(string(appstate.WAPatchRegularLow))
 	if err != nil {
@@ -2308,7 +2316,34 @@ func TestArchiveChatUsesSynchronousFullReplayForMismatch(t *testing.T) {
 	}
 }
 
-func TestArchiveChatWaitsForPrimaryRecoveryAfterFullReplayMismatch(t *testing.T) {
+func TestArchiveChatFallsBackToFullReplayWhenSnapshotFails(t *testing.T) {
+	a := newTestApp(t)
+	f := newFakeWA()
+	a.wa = f
+	f.appStateFetchErrs = []error{
+		fmt.Errorf("failed to verify regular_low patch: %w", appstate.ErrMismatchingLTHash),
+		nil,
+	}
+	f.appStateRecoveryErr = errors.New("phone offline")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.ArchiveChat(ctx, types.JID{User: "456", Server: types.DefaultUserServer}, true); err != nil {
+		t.Fatalf("ArchiveChat: %v", err)
+	}
+	f.mu.Lock()
+	fetches := append([]fakeAppStateFetch(nil), f.appStateFetches...)
+	archiveCalls := len(f.archiveCalls)
+	f.mu.Unlock()
+	if len(fetches) != 2 || fetches[0].fullSync || !fetches[1].fullSync {
+		t.Fatalf("app state fetches = %+v, want delta then full replay after the snapshot failed", fetches)
+	}
+	if archiveCalls != 1 {
+		t.Fatalf("archive calls = %d, want 1 after full replay", archiveCalls)
+	}
+}
+
+func TestArchiveChatWaitsForPrimaryRecoveryAfterDeltaMismatch(t *testing.T) {
 	a := newTestApp(t)
 	f := newFakeWA()
 	a.wa = f
@@ -2321,7 +2356,7 @@ func TestArchiveChatWaitsForPrimaryRecoveryAfterFullReplayMismatch(t *testing.T)
 		}
 	}
 	mismatch := fmt.Errorf("failed to verify regular_low patch: %w", appstate.ErrMismatchingLTHash)
-	f.appStateFetchErrs = []error{mismatch, mismatch}
+	f.appStateFetchErrs = []error{mismatch}
 	recoveryRequested := make(chan string, 1)
 	releaseRecovery := make(chan struct{})
 	f.onAppStateRecovery = func(name string) {
@@ -2375,8 +2410,8 @@ func TestArchiveChatWaitsForPrimaryRecoveryAfterFullReplayMismatch(t *testing.T)
 	archiveCalls := len(f.archiveCalls)
 	handlers := len(f.handlers)
 	f.mu.Unlock()
-	if len(fetches) != 2 || fetches[0].fullSync || !fetches[1].fullSync {
-		t.Fatalf("app state fetches = %+v, want delta then failed full replay", fetches)
+	if len(fetches) != 1 || fetches[0].fullSync {
+		t.Fatalf("app state fetches = %+v, want the failed delta only before the snapshot", fetches)
 	}
 	if len(recoveries) != 1 || recoveries[0] != string(appstate.WAPatchRegularLow) {
 		t.Fatalf("app state recoveries = %v, want [regular_low]", recoveries)
@@ -2539,6 +2574,9 @@ func TestArchiveChatWaitsForMissingKeyDuringFullReplay(t *testing.T) {
 		fmt.Errorf("failed to decode regular_low snapshot: %w", appstate.ErrKeyNotFound),
 		nil,
 	}
+	// The snapshot comes first; a phone that refuses it sends the write down
+	// the full-replay path whose missing-key wait this test covers.
+	f.appStateRecoveryErr = errors.New("phone offline")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -2566,6 +2604,9 @@ func TestChatStateSerializationRespectsContextCancellation(t *testing.T) {
 		fmt.Errorf("failed to verify regular_low patch: %w", appstate.ErrMismatchingLTHash),
 		nil,
 	}
+	// The snapshot comes first; a phone that refuses it sends the first write
+	// down the full replay this test holds open.
+	f.appStateRecoveryErr = errors.New("phone offline")
 	replayStarted := make(chan struct{})
 	releaseReplay := make(chan struct{})
 	f.appStateFetchEvent = func(name string, fullSync, onlyIfNotSynced bool) any {

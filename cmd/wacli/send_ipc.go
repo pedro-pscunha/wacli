@@ -68,6 +68,11 @@ type sendDelegateRequest struct {
 	Receipts             bool     `json:"receipts,omitempty"`
 	ChatStateAction      string   `json:"chat_state_action,omitempty"`
 	MuteDurationMS       int64    `json:"mute_duration_ms,omitempty"`
+	Enable               *bool    `json:"enable,omitempty"`
+	LabelID              string   `json:"label_id,omitempty"`
+	LabelName            string   `json:"label_name,omitempty"`
+	LabelColor           int32    `json:"label_color,omitempty"`
+	LabelDeleted         bool     `json:"label_deleted,omitempty"`
 	PostSendWaitMS       int64    `json:"post_send_wait_ms,omitempty"`
 	TimeoutMS            int64    `json:"timeout_ms,omitempty"`
 	DeadlineUnixMS       int64    `json:"deadline_unix_ms,omitempty"`
@@ -248,7 +253,7 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
 	// transport alive through its budget and the final response write.
 	_ = conn.SetDeadline(deadline.Add(sendDelegateResponseGrace))
 
-	if req.Kind == chatStateKind {
+	if isAppStateKind(req.Kind) {
 		// App-state writes are serialized by the app and can wait minutes on
 		// recovery, so they must not hold the send queue.
 		if requestCtx.Err() != nil {
@@ -354,6 +359,10 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 		return executeDelegatedMarkRead(ctx, a, req)
 	case chatStateKind:
 		return executeDelegatedChatState(ctx, a, req)
+	case labelChatKind:
+		return executeDelegatedLabelChat(ctx, a, req)
+	case labelEditKind:
+		return executeDelegatedLabelEdit(ctx, a, req)
 	default:
 		return sendDelegateResponse{}, fmt.Errorf("unsupported send kind %q", req.Kind)
 	}
@@ -426,6 +435,49 @@ func executeDelegatedChatState(ctx context.Context, a delegatedChatStateApp, req
 		return sendDelegateResponse{}, err
 	}
 	return sendDelegateResponse{OK: true, Chat: toJID.String(), Action: req.ChatStateAction}, nil
+}
+
+// Labels take the same pre-write sync as the chat flags inside App.LabelChat
+// and App.EditLabel, so a lagging regular version is repaired from a
+// primary-device snapshot before the send instead of failing with a 409.
+type delegatedLabelApp interface {
+	recipientResolverApp
+	LabelChat(context.Context, types.JID, string, bool) error
+	EditLabel(context.Context, string, string, int32, bool) error
+}
+
+func executeDelegatedLabelChat(ctx context.Context, a delegatedLabelApp, req sendDelegateRequest) (sendDelegateResponse, error) {
+	if req.LabelID == "" {
+		return sendDelegateResponse{}, fmt.Errorf("label id is required")
+	}
+	toJID, err := resolveRecipient(a, req.To, recipientOptions{pick: req.Pick, asJSON: true})
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	// Enable defaults to true, so an absent field means attach.
+	labeled := req.Enable == nil || *req.Enable
+	if err := a.LabelChat(ctx, toJID, req.LabelID, labeled); err != nil {
+		return sendDelegateResponse{}, err
+	}
+	action := "attach"
+	if !labeled {
+		action = "detach"
+	}
+	return sendDelegateResponse{OK: true, Chat: toJID.String(), Target: toJID.String(), Action: action}, nil
+}
+
+func executeDelegatedLabelEdit(ctx context.Context, a delegatedLabelApp, req sendDelegateRequest) (sendDelegateResponse, error) {
+	if req.LabelID == "" {
+		return sendDelegateResponse{}, fmt.Errorf("label id is required")
+	}
+	if err := a.EditLabel(ctx, req.LabelID, req.LabelName, req.LabelColor, req.LabelDeleted); err != nil {
+		return sendDelegateResponse{}, err
+	}
+	action := "edit"
+	if req.LabelDeleted {
+		action = "delete"
+	}
+	return sendDelegateResponse{OK: true, Target: req.LabelID, Action: action}, nil
 }
 
 func executeDelegatedPresence(ctx context.Context, a *app.App, req sendDelegateRequest) (sendDelegateResponse, error) {

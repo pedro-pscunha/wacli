@@ -197,9 +197,27 @@ func (a *App) syncChatStateBeforeWrite(ctx context.Context, collection appstate.
 			return a.clearCompletedAppStateRecovery(collection, markerGeneration)
 		}
 
-		if errors.Is(err, appstate.ErrMismatchingLTHash) || errors.Is(err, wa.ErrEmptyAppStateKeyShare) {
+		if errors.Is(err, appstate.ErrMismatchingLTHash) {
+			// The local hash state no longer matches the server chain. Ask the
+			// primary device for a snapshot first: it restores the collection at
+			// the server head without replaying the chain, which is the only
+			// repair that works when the chain itself fails verification. A full
+			// replay on such a chain stops at the server snapshot and leaves the
+			// version behind head, so it is the fallback, not the first step.
+			snapshotCtx, cancelSnapshot := context.WithTimeout(ctx, appStateRecoveryStepTimeout)
+			snapshotErr := a.recoverMismatchingAppState(snapshotCtx, collection, markerGeneration, tracker, nil)
+			cancelSnapshot()
+			if snapshotErr == nil {
+				return nil
+			}
+			if ctx.Err() != nil || isAppStatePersistenceFailure(snapshotErr) {
+				return snapshotErr
+			}
+			a.emitWarning("app_state_recovery_snapshot_failed",
+				fmt.Sprintf("warning: app state %s recovery snapshot failed: %v; falling back to full sync", collection, snapshotErr),
+				map[string]any{"name": string(collection), "error": snapshotErr.Error()})
 			return a.replayRequiredAppState(ctx, collection, markerGeneration, tracker)
-		} else if errors.Is(err, appstate.ErrKeyNotFound) {
+		} else if errors.Is(err, wa.ErrEmptyAppStateKeyShare) || errors.Is(err, appstate.ErrKeyNotFound) {
 			return a.replayRequiredAppState(ctx, collection, markerGeneration, tracker)
 		} else {
 			return fmt.Errorf("sync WhatsApp chat state before update: %w", err)
@@ -261,7 +279,7 @@ func (a *App) recoverMismatchingAppState(ctx context.Context, collection appstat
 		return err
 	}
 	if persistenceErr := <-result; persistenceErr != nil {
-		return fmt.Errorf("persist recovered app state %s: %w", collection, persistenceErr)
+		return &appStatePersistenceFailure{err: fmt.Errorf("persist recovered app state %s: %w", collection, persistenceErr)}
 	}
 	if recoveryErr != nil {
 		return recoveryErr
