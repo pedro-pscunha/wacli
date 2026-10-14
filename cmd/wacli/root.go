@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -181,6 +182,16 @@ func resolveStoreDir(flags *rootFlags) (string, error) {
 				return "", err
 			}
 			storeDir = resolved
+		} else if found && len(cfg.Accounts) > 0 {
+			// Accounts and no default_account: the account is a choice, never a fallback. The base store would be
+			// an empty one, so a read would answer "nothing" for an account that has messages.
+			names := make([]string, 0, len(cfg.Accounts))
+			for name := range cfg.Accounts {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			return "", fmt.Errorf("no account selected and no default_account in %s: pass --account (one of: %s)",
+				config.DefaultConfigPath(), strings.Join(names, ", "))
 		} else {
 			storeDir = config.DefaultStoreDir()
 		}

@@ -150,6 +150,48 @@ func TestResolveStoreDirEnvBeatsDefaultAccount(t *testing.T) {
 	}
 }
 
+func TestResolveStoreDirAccountsWithoutDefaultRequireAccount(t *testing.T) {
+	isolateAccountConfigHome(t)
+	cfgPath := config.DefaultConfigPath()
+	cfg := &config.AccountsConfig{
+		Accounts: map[string]config.AccountEntry{
+			"work":     {Store: "accounts/work"},
+			"personal": {Store: "accounts/personal"},
+		},
+	}
+	if err := config.SaveAccountsConfig(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveStoreDir(&rootFlags{})
+	if err == nil || !strings.Contains(err.Error(), "pass --account (one of: personal, work)") {
+		t.Fatalf("resolveStoreDir error = %v, want a refusal that names the accounts", err)
+	}
+	got, err := resolveStoreDir(&rootFlags{account: "personal"})
+	if err != nil {
+		t.Fatalf("resolveStoreDir --account: %v", err)
+	}
+	if want := filepath.Join(filepath.Dir(cfgPath), "accounts", "personal"); got != want {
+		t.Fatalf("storeDir = %q, want %q", got, want)
+	}
+	envStore := filepath.Join(t.TempDir(), "env-store")
+	t.Setenv(config.EnvStoreDir, envStore)
+	if got, err := resolveStoreDir(&rootFlags{}); err != nil || got != envStore {
+		t.Fatalf("storeDir = %q, %v; want the WACLI_STORE_DIR store", got, err)
+	}
+}
+
+func TestResolveStoreDirNoConfigUsesBaseStore(t *testing.T) {
+	isolateAccountConfigHome(t)
+	got, err := resolveStoreDir(&rootFlags{})
+	if err != nil {
+		t.Fatalf("resolveStoreDir: %v", err)
+	}
+	if want, _ := filepath.Abs(config.DefaultStoreDir()); got != want {
+		t.Fatalf("storeDir = %q, want %q", got, want)
+	}
+}
+
 func isolateAccountConfigHome(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()

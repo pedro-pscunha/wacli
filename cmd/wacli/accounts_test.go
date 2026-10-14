@@ -47,6 +47,33 @@ func TestAccountsAddNoAuthCreatesConfig(t *testing.T) {
 	}
 }
 
+func TestAccountsAddKeepsNoDefaultWhenAccountsExist(t *testing.T) {
+	isolateAccountConfigHome(t)
+	cfg := &config.AccountsConfig{Accounts: map[string]config.AccountEntry{"work": {Store: "accounts/work"}}}
+	if err := config.SaveAccountsConfig(config.DefaultConfigPath(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	captureRootStderr(t, func() {
+		captureRootStdout(t, func() {
+			if err := execute([]string{"accounts", "add", "personal", "--no-auth"}); err != nil {
+				t.Fatalf("execute accounts add: %v", err)
+			}
+		})
+	})
+
+	got, err := config.LoadAccountsConfig(config.DefaultConfigPath())
+	if err != nil {
+		t.Fatalf("LoadAccountsConfig: %v", err)
+	}
+	if got.DefaultAccount != "" {
+		t.Fatalf("DefaultAccount = %q, want none: a removed default stays removed", got.DefaultAccount)
+	}
+	if _, ok := got.Accounts["personal"]; !ok {
+		t.Fatal("personal account missing")
+	}
+}
+
 func TestAccountsAddValidatesAuthFlagsBeforeSaving(t *testing.T) {
 	isolateAccountConfigHome(t)
 
