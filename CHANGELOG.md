@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Accounts: with accounts in `config.yaml` and no `default_account`, a command without `--account`, `--store` or `WACLI_STORE_DIR` fails and names the accounts, instead of using the base store (empty on a multi-account host, so a read answered nothing). `accounts add` sets the default only for the first account.
 - Labels: add `labels list|create|rename|delete|attach|detach`, delegate writes through the running sync daemon outside the send queue (like upstream's chat-state kind), key DM memberships on the LID, and merge phone/LID forms when listing.
 - Sync: on an LTHash mismatch request the phone recovery snapshot first and fall back to a full refresh, raise each repair step's timeout to 2 minutes, and admit a new repair after every successful one instead of once per run. A key shared without data keeps upstream's full-refresh path. Stop forcing a full refresh of `regular` on connect. Label writes run the chat-state pre-write sync so a lagging `regular` version no longer fails with a 409 conflict. A pre-write sync that hits a mismatch asks for the snapshot first too; upstream's degraded incremental replay of a pending intent (#490) is kept as is.
 
