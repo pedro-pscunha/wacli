@@ -104,10 +104,12 @@ func newAccountsAddCmd(flags *rootFlags) *cobra.Command {
 				if _, ok := cfg.Accounts[name]; ok {
 					return fmt.Errorf("account %q already exists", name)
 				}
-				cfg.Accounts[name] = config.AccountEntry{Store: config.DefaultAccountStore(name)}
-				if cfg.DefaultAccount == "" {
+				// Only the first account becomes the default: a config whose default_account was removed on
+				// purpose (every call names its account) keeps none when another account is added.
+				if len(cfg.Accounts) == 0 && cfg.DefaultAccount == "" {
 					cfg.DefaultAccount = name
 				}
+				cfg.Accounts[name] = config.AccountEntry{Store: config.DefaultAccountStore(name)}
 				storeDir := config.ListAccounts(path, cfg)
 				for _, account := range storeDir {
 					if account.Name == name {
