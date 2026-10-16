@@ -448,6 +448,58 @@ func TestFailedAppStateReplayPersistsIntentAndRecoversAtStartup(t *testing.T) {
 	}
 }
 
+func TestStartupAppStateReplayOrderFollowsFullSyncFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		fullSyncBroke bool
+	}{
+		{name: "flagged collection asks the phone first", fullSyncBroke: true},
+		{name: "unflagged collection replays in full first", fullSyncBroke: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t)
+			name := string(appstate.WAPatchRegularLow)
+			if _, err := a.db.MarkAppStateRecoveryGeneration(name); err != nil {
+				t.Fatal(err)
+			}
+			if tc.fullSyncBroke {
+				if err := a.db.SetAppStateFullSyncBroken(name, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f := newFakeWA()
+			f.onAppStateRecovery = func(name string) {
+				f.emit(&events.AppStateSyncComplete{Name: appstate.WAPatchName(name), Recovery: true})
+			}
+			a.wa = f
+
+			var recoveries sync.Map
+			a.syncAppStateDeltas(t.Context(), &recoveries)
+
+			if required, err := a.db.AppStateRecoveryRequired(name); err != nil || required {
+				t.Fatalf("recovery intent after startup replay = %v, %v; want cleared", required, err)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			fullReplays := 0
+			for _, fetch := range f.appStateFetches {
+				if fetch.name == name && fetch.fullSync {
+					fullReplays++
+				}
+			}
+			if tc.fullSyncBroke {
+				if len(f.appStateRecoveries) != 1 || f.appStateRecoveries[0] != name || fullReplays != 0 {
+					t.Fatalf("snapshots = %v, full replays = %d; want one %s snapshot and no full replay", f.appStateRecoveries, fullReplays, name)
+				}
+				return
+			}
+			if len(f.appStateRecoveries) != 0 || fullReplays != 1 {
+				t.Fatalf("snapshots = %v, full replays = %d; want no snapshot and one full replay", f.appStateRecoveries, fullReplays)
+			}
+		})
+	}
+}
+
 type recoveryCloseWA struct {
 	*appStateContextWA
 	disconnected chan struct{}

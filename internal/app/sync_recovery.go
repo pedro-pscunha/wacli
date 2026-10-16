@@ -94,7 +94,9 @@ func (a *App) handleAppStateSyncError(ctx context.Context, evt *events.AppStateS
 // A pending recovery intent found at startup keeps the opposite order. The
 // intent means local persistence may have missed events, not that the hash
 // state diverged, and a full replay re-derives local state from the server
-// without waking the phone.
+// without waking the phone. The exception is a collection whose full sync is
+// known not to verify (app_state_full_sync_broken): a full replay there only
+// deletes the local version, so its startup replay asks the phone first too.
 func (a *App) recoverAppStateCollection(ctx context.Context, name string, recoveries *sync.Map, timeout time.Duration, snapshotFirst bool) {
 	repaired := false
 	defer func() {
@@ -249,7 +251,8 @@ func (a *App) syncAppStateDeltas(ctx context.Context, recoveries *sync.Map) {
 	replayed := make(map[string]bool, len(pending))
 	for _, name := range pending {
 		if _, loaded := recoveries.LoadOrStore(name, struct{}{}); !loaded {
-			a.recoverAppStateCollection(ctx, name, recoveries, appStateRecoveryStepTimeout, false)
+			snapshotFirst := a.isAppStateFullSyncBroken(appstate.WAPatchName(name))
+			a.recoverAppStateCollection(ctx, name, recoveries, appStateRecoveryStepTimeout, snapshotFirst)
 			replayed[name] = true
 		}
 	}
