@@ -39,7 +39,7 @@ func runTimedOutRecoveryAttempt(t *testing.T, a *App, name string) {
 	t.Helper()
 	var budget sync.Map
 	budget.Store(name, struct{}{})
-	a.recoverAppStateCollection(t.Context(), name, &budget, 50*time.Millisecond)
+	a.recoverAppStateCollection(t.Context(), name, &budget, 50*time.Millisecond, false)
 	if required, err := a.db.AppStateRecoveryRequired(name); err != nil || !required {
 		t.Fatalf("recovery intent after timed out attempt = %v, %v; want true", required, err)
 	}

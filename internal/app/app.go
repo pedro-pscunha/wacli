@@ -13,6 +13,7 @@ import (
 	"github.com/openclaw/wacli/internal/store"
 	"github.com/openclaw/wacli/internal/wa"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -95,6 +96,9 @@ type WAClient interface {
 	RequestHistorySyncOnDemand(ctx context.Context, lastKnown types.MessageInfo, count int) (types.MessageID, error)
 	FetchAppState(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) error
 	FetchAppStateEvents(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) ([]any, error)
+	FetchAppStateSnapshotUnverified(ctx context.Context, name string) ([]appstate.Mutation, error)
+	EditLabel(ctx context.Context, labelID, name string, color int32, deleted bool) error
+	LabelChat(ctx context.Context, target types.JID, labelID string, labeled bool) error
 	RequestAppStateRecovery(ctx context.Context, name string) (types.MessageID, error)
 	HasLocalAppState(ctx context.Context, name string) (bool, error)
 	Logout(ctx context.Context) error
@@ -133,6 +137,7 @@ type App struct {
 	appStateRecoveryWorkers sync.WaitGroup
 	appStateRecoveryMu      sync.Mutex
 	appStateRecoveryClosing bool
+	appStateRecoveryRetryAt map[string]time.Time
 	// Background continuations of recovery attempts the primary answered late,
 	// at most one per collection. Guarded by appStateRecoveryMu.
 	lateRecoveries   map[string]*lateAppStateRecovery
