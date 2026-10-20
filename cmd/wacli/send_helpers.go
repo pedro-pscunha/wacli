@@ -16,7 +16,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-const sendAttemptTimeout = 45 * time.Second
+const sendAttemptTimeout = 2 * time.Minute
 const postSendRetryReceiptWait = 2 * time.Second
 const rapidSendWarningThreshold = 5 * time.Second
 const lastSendAttemptFile = ".last-send-at"
