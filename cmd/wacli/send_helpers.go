@@ -17,6 +17,10 @@ import (
 )
 
 const sendAttemptTimeout = 2 * time.Minute
+
+// A file send's attempt grows with the file, since the upload is most of it: at 512 KiB/s, under half the rate
+// measured on the Mac (an 89 MB document in 75 s), a 240 MB video gets about 8 minutes.
+const minUploadBytesPerSecond = 512 * 1024
 const postSendRetryReceiptWait = 2 * time.Second
 const rapidSendWarningThreshold = 5 * time.Second
 const lastSendAttemptFile = ".last-send-at"
@@ -29,6 +33,29 @@ func runSendOperation[T any](
 	return runOperationWithRetry(ctx, reconnect, op, isRetryableSendError)
 }
 
+// runFileSendOperation is runSendOperation with an attempt sized to the file's upload (fileSendAttemptTimeout).
+func runFileSendOperation[T any](
+	ctx context.Context,
+	filePath string,
+	reconnect func(context.Context) error,
+	op func(context.Context) (T, error),
+) (T, error) {
+	return runOperationWithAttemptTimeout(ctx, fileSendAttemptTimeout(filePath), reconnect, op, isRetryableSendError)
+}
+
+// fileSendAttemptTimeout is sendAttemptTimeout, or the file's upload time at minUploadBytesPerSecond when that is
+// longer. A file it cannot stat gets sendAttemptTimeout: sendFile reports the error itself.
+func fileSendAttemptTimeout(filePath string) time.Duration {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return sendAttemptTimeout
+	}
+	if t := time.Duration(info.Size()/minUploadBytesPerSecond) * time.Second; t > sendAttemptTimeout {
+		return t
+	}
+	return sendAttemptTimeout
+}
+
 // Share the bounded attempt/reconnect mechanics while allowing idempotent
 // presence updates to retain a broader policy than fresh message operations.
 func runOperationWithRetry[T any](
@@ -37,7 +64,17 @@ func runOperationWithRetry[T any](
 	op func(context.Context) (T, error),
 	retryable func(error) bool,
 ) (T, error) {
-	result, err := runSendAttempt(ctx, sendAttemptTimeout, op)
+	return runOperationWithAttemptTimeout(ctx, sendAttemptTimeout, reconnect, op, retryable)
+}
+
+func runOperationWithAttemptTimeout[T any](
+	ctx context.Context,
+	attemptTimeout time.Duration,
+	reconnect func(context.Context) error,
+	op func(context.Context) (T, error),
+	retryable func(error) bool,
+) (T, error) {
+	result, err := runSendAttempt(ctx, attemptTimeout, op)
 	if err == nil {
 		return result, nil
 	}
@@ -49,7 +86,7 @@ func runOperationWithRetry[T any](
 	if reconnectErr := reconnect(ctx); reconnectErr != nil {
 		return zero, fmt.Errorf("%w; reconnect failed: %v", err, reconnectErr)
 	}
-	return runSendAttempt(ctx, sendAttemptTimeout, op)
+	return runSendAttempt(ctx, attemptTimeout, op)
 }
 
 func runSendAttempt[T any](ctx context.Context, timeout time.Duration, op func(context.Context) (T, error)) (T, error) {

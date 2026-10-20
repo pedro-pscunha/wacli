@@ -31,7 +31,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const maxSendFileSize = 100 * 1024 * 1024
+// WhatsApp takes documents up to 2 GB. The file and its encrypted copy are held in memory during the upload.
+const maxSendFileSize = 2_000_000_000
 const imageThumbnailMaxDimension = 96
 const imageThumbnailMaxPixels = 40_000_000
 const voiceWaveformSamples = 64

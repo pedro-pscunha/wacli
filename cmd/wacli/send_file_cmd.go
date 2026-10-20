@@ -42,6 +42,13 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			// The default budget (5 min, which also bounds a delegated send in the daemon) would cut a large
+			// upload short: unless --timeout was given, it covers the file's send attempt plus a minute.
+			if !cmd.Flags().Changed("timeout") {
+				if need := fileSendAttemptTimeout(filePath) + time.Minute; need > flags.timeout {
+					flags.timeout = need
+				}
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 
@@ -91,7 +98,7 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			res, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
+			res, err := runFileSendOperation(ctx, filePath, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
 				return sendFile(ctx, a, toJID, filePath, sendFileOptions{
 					filename:      filename,
 					caption:       caption,

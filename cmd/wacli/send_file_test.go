@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openclaw/wacli/internal/fsutil"
 	"github.com/openclaw/wacli/internal/wa"
@@ -56,6 +57,47 @@ func TestReadSendFileDataRejectsOversizedFile(t *testing.T) {
 	_, err := readSendFileData(path)
 	if err == nil || !strings.Contains(err.Error(), "file too large") {
 		t.Fatalf("expected file too large error, got %v", err)
+	}
+}
+
+func TestReadSendFileDataAcceptsFileOver100MB(t *testing.T) {
+	path := t.TempDir() + "/film.mp4"
+	if err := fsutil.WritePrivateFile(path, nil); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Truncate(path, 124_358_432); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+
+	data, err := readSendFileData(path)
+	if err != nil {
+		t.Fatalf("readSendFileData: %v", err)
+	}
+	if len(data) != 124_358_432 {
+		t.Fatalf("read %d bytes, want 124358432", len(data))
+	}
+}
+
+func TestFileSendAttemptTimeoutGrowsWithTheFile(t *testing.T) {
+	dir := t.TempDir()
+	small, large := dir+"/small.bin", dir+"/large.bin"
+	for path, size := range map[string]int64{small: 1 << 20, large: 240 << 20} {
+		if err := fsutil.WritePrivateFile(path, nil); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		if err := os.Truncate(path, size); err != nil {
+			t.Fatalf("Truncate: %v", err)
+		}
+	}
+
+	if got := fileSendAttemptTimeout(small); got != sendAttemptTimeout {
+		t.Fatalf("1 MiB: %s, want %s", got, sendAttemptTimeout)
+	}
+	if got := fileSendAttemptTimeout(large); got != 480*time.Second {
+		t.Fatalf("240 MiB: %s, want 8m0s", got)
+	}
+	if got := fileSendAttemptTimeout(dir + "/missing.bin"); got != sendAttemptTimeout {
+		t.Fatalf("missing file: %s, want %s", got, sendAttemptTimeout)
 	}
 }
 
