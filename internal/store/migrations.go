@@ -46,6 +46,22 @@ var schemaMigrations = []migration{
 	{version: 30, name: "retrieval identity, revision and sync state", up: migrateRetrieval},
 	{version: 31, name: "content-free message change journal", up: migrateChanges},
 	{version: 32, name: "message receipt retrieval revisions", up: migrateReceiptRetrieval},
+	{version: 33, name: "own message id lookup index", up: migrateOwnMessageIDIndex},
+}
+
+// migrateOwnMessageIDIndex lets FindOwnMessage find a sent message by its id
+// without scanning the table: the primary key is (chat_jid, msg_id), so msg_id
+// alone has no usable index. The index is partial, so it holds only the
+// messages this account sent. An older binary ignores the extra migration row.
+func migrateOwnMessageIDIndex(d *DB) error {
+	hasMessages, err := d.tableExists("messages")
+	if err != nil || !hasMessages {
+		return err
+	}
+	if _, err := d.sql.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_msgid_fromme ON messages(msg_id) WHERE from_me = 1`); err != nil {
+		return fmt.Errorf("create own message id index: %w", err)
+	}
+	return nil
 }
 
 func migratePlaceholderChatActivity(d *DB) error {

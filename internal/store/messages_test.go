@@ -1492,3 +1492,46 @@ func TestPurgeMessageClearsStoredLocation(t *testing.T) {
 		t.Fatalf("purged message retained its coordinates: err = %v", err)
 	}
 }
+
+func TestFindOwnMessageUsesItsIndex(t *testing.T) {
+	d := openTestDB(t)
+	if err := d.UpsertChat("a@s.whatsapp.net", "dm", "A", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []UpsertMessageParams{
+		{ChatJID: "a@s.whatsapp.net", MsgID: "MINE0000001", Timestamp: time.Now(), FromMe: true, Text: "x"},
+		{ChatJID: "a@s.whatsapp.net", MsgID: "THEIRS00001", Timestamp: time.Now(), FromMe: false, Text: "y"},
+	} {
+		if err := d.UpsertMessage(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if chat, ok, err := d.FindOwnMessage("MINE0000001"); err != nil || !ok || chat != "a@s.whatsapp.net" {
+		t.Fatalf("own message: %q %v %v", chat, ok, err)
+	}
+	if _, ok, _ := d.FindOwnMessage("THEIRS00001"); ok {
+		t.Fatal("another sender's message was found as own")
+	}
+	if _, ok, _ := d.FindOwnMessage("NOSUCHID0001"); ok {
+		t.Fatal("a missing id was found")
+	}
+
+	// The lookup must be an index search, not a table scan.
+	rows, err := d.sql.Query(`EXPLAIN QUERY PLAN SELECT chat_jid FROM messages WHERE msg_id = ? AND from_me = 1 LIMIT 1`, "MINE0000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	plan := ""
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan += detail + "\n"
+	}
+	if !strings.Contains(plan, "idx_messages_msgid_fromme") {
+		t.Fatalf("query plan does not use the index:\n%s", plan)
+	}
+}
