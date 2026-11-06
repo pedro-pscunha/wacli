@@ -194,16 +194,7 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newLocalApp(ctx, flags, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-			jids, err := contactMetadataJIDs(ctx, a, jid)
-			if err != nil {
-				return err
-			}
-			if err := a.DB().SetAlias(jids, alias); err != nil {
+			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, Alias: alias, SubAction: "set"}); err != nil {
 				return err
 			}
 			if flags.asJSON {
@@ -226,16 +217,7 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newLocalApp(ctx, flags, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-			jids, err := contactMetadataJIDs(ctx, a, jid)
-			if err != nil {
-				return err
-			}
-			if err := a.DB().RemoveAlias(jids); err != nil {
+			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, SubAction: "rm"}); err != nil {
 				return err
 			}
 			if flags.asJSON {
@@ -270,16 +252,7 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newLocalApp(ctx, flags, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-			jids, err := contactMetadataJIDs(ctx, a, jid)
-			if err != nil {
-				return err
-			}
-			if err := a.DB().AddTag(jids, tag); err != nil {
+			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "add"}); err != nil {
 				return err
 			}
 			if flags.asJSON {
@@ -303,16 +276,7 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newLocalApp(ctx, flags, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-			jids, err := contactMetadataJIDs(ctx, a, jid)
-			if err != nil {
-				return err
-			}
-			if err := a.DB().RemoveTag(jids, tag); err != nil {
+			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "rm"}); err != nil {
 				return err
 			}
 			if flags.asJSON {

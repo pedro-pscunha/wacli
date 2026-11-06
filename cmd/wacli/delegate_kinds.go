@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/openclaw/wacli/internal/app"
+	"github.com/openclaw/wacli/internal/lock"
 	"github.com/openclaw/wacli/internal/wa"
 )
 
@@ -23,6 +24,12 @@ type kindHandler struct {
 	// can still write the local database (group info, channel list): the name
 	// says only that they do not wait on the send queue.
 	skipsQueue bool
+	// localOK marks a kind that only reads or writes the local store and never
+	// touches the WhatsApp connection. With a daemon listening the call goes to it
+	// (it holds the store); with none, the command runs the handler itself under
+	// the store lock, even on a pinned store, because the App it gets still
+	// refuses to connect.
+	localOK bool
 	// slot says which queue the kind runs on. The zero value is the send queue.
 	slot slotKind
 }
@@ -138,7 +145,20 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 	if err := validateDelegateRequest(req); err != nil {
 		return zero, err
 	}
-	a, lk, err := newApp(ctx, flags, true, false)
+	var (
+		a   *app.App
+		lk  *lock.Lock
+		err error
+	)
+	if h.localOK {
+		if sendDelegateAvailable(ctx, mustStoreDir(flags)) {
+			err = fmt.Errorf("%w: the sync daemon serves this store", lock.ErrLocked)
+		} else {
+			a, lk, err = newLocalApp(ctx, flags, false)
+		}
+	} else {
+		a, lk, err = newApp(ctx, flags, true, false)
+	}
 	if err != nil {
 		resp, delegated, derr := tryDelegateSend(ctx, flags, err, req)
 		if !delegated {
@@ -157,8 +177,12 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 		return out, nil
 	}
 	defer closeApp(a, lk)
-	if err := a.EnsureAuthed(ctx); err != nil {
-		return zero, err
+	if !h.localOK {
+		// A kind that uses the connection needs the session. A local-only kind needs neither
+		// the session nor an authenticated store: its handler never touches WhatsApp.
+		if err := a.EnsureAuthed(ctx); err != nil {
+			return zero, err
+		}
 	}
 	if resp, done, err := alreadySentResponse(ctx, a, req); err != nil {
 		return zero, err
@@ -212,4 +236,14 @@ func validateTargetMessageID(flag, id string) error {
 		return fmt.Errorf("invalid %s %q", flag, id)
 	}
 	return nil
+}
+
+// mustStoreDir is the store directory of a call whose flags already resolved once; an
+// error here means the flags are unusable, and the dial that follows fails the same way.
+func mustStoreDir(flags *rootFlags) string {
+	dir, err := resolveStoreDir(flags)
+	if err != nil {
+		return ""
+	}
+	return dir
 }

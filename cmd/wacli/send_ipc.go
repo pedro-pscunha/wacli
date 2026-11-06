@@ -109,7 +109,10 @@ type sendDelegateRequest struct {
 	WaitMS       int64    `json:"wait_ms,omitempty"`
 	Limit        int      `json:"limit,omitempty"`
 	Workers      int      `json:"workers,omitempty"`
-	IdleExitMS   int64    `json:"idle_exit_ms,omitempty"`
+	// Alias and Tag belong to the contact_alias and contact_tag kinds (the contact is in To).
+	Alias      string `json:"alias,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+	IdleExitMS int64  `json:"idle_exit_ms,omitempty"`
 	// Strict makes revoke fail on a message the store does not know.
 	Strict bool `json:"strict,omitempty"`
 }
