@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -112,6 +113,9 @@ type WAClient interface {
 	GetBusinessProfile(ctx context.Context, jid types.JID) (*types.BusinessProfile, error)
 }
 
+// ErrDelegateOnly is returned by Connect when the app is delegate-only.
+var ErrDelegateOnly = errors.New("daemon not running; refusing to connect outside the sync daemon (--delegate-only)")
+
 type Options struct {
 	StoreDir      string
 	Version       string
@@ -119,6 +123,8 @@ type Options struct {
 	Events        *out.EventWriter
 	AllowUnauthed bool
 	ReadOnly      bool
+	// DelegateOnly refuses Connect: only the sync daemon may hold a session.
+	DelegateOnly bool
 }
 
 type App struct {
@@ -250,6 +256,11 @@ func (a *App) EnsureAuthed(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Every caller connects next. Refuse first so the error names the cause,
+	// not a missing session on a store that only the daemon opens.
+	if a.opts.DelegateOnly {
+		return ErrDelegateOnly
+	}
 	if err := a.OpenWA(); err != nil {
 		return err
 	}
@@ -311,6 +322,9 @@ func (a *App) ReadOnly() bool      { return a.opts.ReadOnly }
 func (a *App) Connect(ctx context.Context, allowQR bool, qrWriter func(string)) error {
 	if a.opts.ReadOnly {
 		return fmt.Errorf("read-only mode: command would connect to WhatsApp")
+	}
+	if a.opts.DelegateOnly {
+		return ErrDelegateOnly
 	}
 	if err := a.OpenWA(); err != nil {
 		return err

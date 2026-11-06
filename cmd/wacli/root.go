@@ -51,6 +51,11 @@ type rootFlags struct {
 	timeout    time.Duration
 	readOnly   bool
 	lockWait   time.Duration
+	// delegateOnly makes every command that would connect to WhatsApp use the
+	// running sync daemon, and refuse when none runs.
+	delegateOnly bool
+	// isDaemon marks the sync process, the one process that may connect.
+	isDaemon bool
 }
 
 func execute(args []string) error {
@@ -77,6 +82,8 @@ func execute(args []string) error {
 	rootCmd.PersistentFlags().DurationVar(&flags.timeout, "timeout", 5*time.Minute, "command timeout (non-sync commands)")
 	rootCmd.PersistentFlags().DurationVar(&flags.lockWait, "lock-wait", 0, "wait for the store lock before failing (write commands)")
 	rootCmd.PersistentFlags().BoolVar(&flags.readOnly, "read-only", false, "reject commands that intentionally write WhatsApp or the local store (or set WACLI_READONLY=1)")
+
+	rootCmd.PersistentFlags().BoolVar(&flags.delegateOnly, "delegate-only", false, "never connect to WhatsApp from this process: delegate to the running sync daemon or fail (or set WACLI_DELEGATE_ONLY=1)")
 
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newAccountsCmd(&flags))
@@ -140,6 +147,7 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed 
 		Events:        out.NewEventWriter(os.Stderr, flags.events),
 		AllowUnauthed: allowUnauthed,
 		ReadOnly:      flags.isReadOnly(),
+		DelegateOnly:  flags.isDelegateOnly(),
 	})
 	if err != nil {
 		if lk != nil {
@@ -208,6 +216,21 @@ func (f *rootFlags) isReadOnly() bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("WACLI_READONLY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (f *rootFlags) isDelegateOnly() bool {
+	if f == nil || f.isDaemon {
+		return false
+	}
+	if f.delegateOnly {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WACLI_DELEGATE_ONLY"))) {
 	case "1", "true", "yes", "on":
 		return true
 	default:

@@ -200,3 +200,50 @@ func isolateAccountConfigHome(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Setenv(config.EnvStoreDir, "")
 }
+
+func TestRootFlagsDelegateOnly(t *testing.T) {
+	if (&rootFlags{}).isDelegateOnly() {
+		t.Fatal("isDelegateOnly = true by default")
+	}
+	if !(&rootFlags{delegateOnly: true}).isDelegateOnly() {
+		t.Fatal("flag not honored")
+	}
+	t.Setenv("WACLI_DELEGATE_ONLY", "1")
+	if !(&rootFlags{}).isDelegateOnly() {
+		t.Fatal("env not honored")
+	}
+	if (&rootFlags{isDaemon: true}).isDelegateOnly() {
+		t.Fatal("the sync daemon must stay allowed to connect")
+	}
+}
+
+func TestSyncOnceRefusedWhenDelegateOnly(t *testing.T) {
+	store := t.TempDir()
+	err := execute([]string{"--store", store, "--delegate-only", "sync", "--once"})
+	if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWriteCommandsRefusedWithoutDaemonWhenDelegateOnly(t *testing.T) {
+	cases := [][]string{
+		{"send", "text", "--to", "5511999999999", "--message", "x"},
+		{"send", "file", "--to", "5511999999999", "--file", "/nonexistent"},
+		{"send", "react", "--to", "5511999999999", "--id", "ABC", "--reaction", "x"},
+		{"messages", "edit", "--chat", "5511999999999", "--id", "ABC", "--message", "x"},
+		{"presence", "typing", "--to", "5511999999999"},
+		{"labels", "create", "--name", "x"},
+	}
+	for _, c := range cases {
+		store := t.TempDir()
+		args := append([]string{"--store", store, "--delegate-only"}, c...)
+		err := execute(args)
+		if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+			t.Fatalf("%v: err = %v, want delegate-only refusal", c, err)
+		}
+		if _, statErr := os.Stat(filepath.Join(store, "session.db")); statErr == nil {
+			// OpenWA may create the session store; a connection never starts.
+			t.Logf("%v: session.db created (no connection)", c)
+		}
+	}
+}

@@ -68,6 +68,11 @@ func newSyncCmd(flags *rootFlags) *cobra.Command {
 			ctx, stop := signalContextWithEvents(out.NewEventWriter(os.Stderr, flags.events))
 			defer stop()
 
+			// Only follow mode is the daemon, the one process allowed to connect.
+			flags.isDaemon = !once && follow
+			if !flags.isDaemon && flags.isDelegateOnly() {
+				return fmt.Errorf("sync --once connects to WhatsApp: %w", appPkg.ErrDelegateOnly)
+			}
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
 				return err
