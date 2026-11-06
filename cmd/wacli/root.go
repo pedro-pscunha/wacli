@@ -54,7 +54,10 @@ type rootFlags struct {
 	// delegateOnly makes every command that would connect to WhatsApp use the
 	// running sync daemon, and refuse when none runs.
 	delegateOnly bool
-	// isDaemon marks the sync process, the one process that may connect.
+	// isDaemon marks a process that runs the full sync with the store handler
+	// installed: `sync --follow` and `auth` login. Such a process may connect,
+	// because everything it receives is stored; the store lock still keeps it
+	// from running beside the daemon. `auth logout` is not one of them.
 	isDaemon bool
 }
 

@@ -96,6 +96,10 @@ func runAuth(flags *rootFlags, opts authOptions) (appPkg.SyncResult, error) {
 	ctx, stop := signalContextWithEvents(out.NewEventWriter(os.Stderr, flags.events))
 	defer stop()
 
+	// Pairing runs the full sync with the store handler, so what it receives is
+	// stored, and the lock keeps it off a store a daemon holds. A pinned store
+	// must stay re-pairable without touching the pin.
+	flags.isDaemon = true
 	a, lk, err := newApp(ctx, flags, true, true)
 	if err != nil {
 		return appPkg.SyncResult{}, err

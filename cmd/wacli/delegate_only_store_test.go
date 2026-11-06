@@ -186,3 +186,52 @@ func TestCapabilitiesDoNotAdvertiseClientFlags(t *testing.T) {
 		}
 	}
 }
+
+// MAJ-1: a pinned store stays re-pairable. auth login runs the full sync with
+// the store handler, so it is exempt like sync --follow; it fails later, on the
+// pairing itself, never with the delegate-only refusal.
+func TestAuthLoginIsNotRefusedUnderMarkerOrEnv(t *testing.T) {
+	for name, setup := range map[string]func(store string){
+		"marker": func(store string) {
+			_ = os.WriteFile(filepath.Join(store, config.DelegateOnlyMarker), nil, 0o600)
+		},
+		"env": func(string) { t.Setenv("WACLI_DELEGATE_ONLY", "1") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateAccountConfigHome(t)
+			t.Setenv("WACLI_DELEGATE_ONLY", "")
+			store := t.TempDir()
+			setup(store)
+			// An invalid phone fails in validation after the exemption point is
+			// decided; --phone with a malformed number keeps the test offline.
+			err := execute([]string{"--store", store, "auth", "--phone", "not-a-number"})
+			if err != nil && strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+				t.Fatalf("auth login was refused: %v", err)
+			}
+		})
+	}
+}
+
+// The exemption is for pairing only: logout still connects, so it stays refused.
+func TestAuthLogoutStaysRefusedUnderMarker(t *testing.T) {
+	isolateAccountConfigHome(t)
+	t.Setenv("WACLI_DELEGATE_ONLY", "")
+	store := t.TempDir()
+	if err := os.WriteFile(filepath.Join(store, config.DelegateOnlyMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := execute([]string{"--store", store, "auth", "logout"})
+	if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCapabilitiesAdvertiseStorePin(t *testing.T) {
+	found := false
+	for _, f := range currentCapabilities().Features {
+		found = found || f == "store_pin"
+	}
+	if !found {
+		t.Fatal("capabilities must list store_pin so a health check can tell the binary honours pins")
+	}
+}

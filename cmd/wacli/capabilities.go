@@ -54,7 +54,7 @@ func currentCapabilities() *delegateCapabilities {
 		Version:  effectiveVersion(),
 		Protocol: sendDelegateVersion,
 		Kinds:    kinds,
-		Features: []string{"new_id", "already_sent"},
+		Features: []string{"new_id", "already_sent", "store_pin"},
 	}
 }
 
