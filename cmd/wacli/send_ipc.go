@@ -285,16 +285,20 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 	// sends so a burst of `wacli send` processes delegating to this daemon
 	// leaves the wire paced instead of back-to-back. Disabled = no-op.
 	pacer := newSendPacer(spacing)
-	// Handlers get their own context so stop can cancel them, and a wait group
-	// so stop can wait for them: closing the database under a running backfill
-	// would corrupt its last writes.
+	// Handlers run under the sync's context and a wait group, so stop can wait
+	// for them: closing the database under a running backfill would corrupt its
+	// last writes.
 	//
-	// The handlers' context must outlive the sync: Sync cancels its own context
-	// before the command's deferred stop runs, so a context derived from it would
-	// already be cancelled when stop starts, and "let in-flight requests finish"
-	// would be false. WithoutCancel keeps its values and drops its cancellation;
-	// only stop cancels the handlers, after the grace period.
-	hctx, hcancel := context.WithCancel(context.WithoutCancel(ctx))
+	// The context must be the sync's own, cancelled the moment the sync ends.
+	// Sync removes its store handler on the way out but leaves the socket up
+	// (DetachSocket) until the command's closeApp disconnects it, and whatsmeow
+	// acks every inbound message whether or not a handler is registered. Every
+	// millisecond between "handler removed" and "socket closed" is a window in
+	// which an inbound message is acked and dropped. So an in-flight request must
+	// not hold that window open: it is cancelled at once, a send cut this way is
+	// classified as an unknown outcome, and its pending row makes the retry safe
+	// (resultado_incerto), while the stop wait below stays short.
+	hctx, hcancel := context.WithCancel(ctx)
 	var handlers sync.WaitGroup
 	go func() {
 		defer close(done)
@@ -315,19 +319,15 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 		_ = ln.Close()
 		<-done
 		_ = os.Remove(path)
-		// Let in-flight requests finish, then cancel them and wait once more.
+		// Cancel the handlers now (a no-op when the sync already did) and wait a
+		// bounded time for them to return before the caller closes the database.
+		hcancel()
 		drained := make(chan struct{})
 		go func() { handlers.Wait(); close(drained) }()
 		select {
 		case <-drained:
 		case <-time.After(sendDelegateStopGrace):
-			hcancel()
-			select {
-			case <-drained:
-			case <-time.After(sendDelegateStopGrace):
-			}
 		}
-		hcancel()
 	}
 	return stop, nil
 }
@@ -374,8 +374,10 @@ func (sl *delegateSlots) slotFor(kind string) chan struct{} {
 	return sl.bulk[kind]
 }
 
-// sendDelegateStopGrace bounds how long stop waits for in-flight requests.
-const sendDelegateStopGrace = 10 * time.Second
+// sendDelegateStopGrace bounds how long stop waits for cancelled requests to
+// return. The connection is up with no store handler for this long at worst, so
+// it is short.
+var sendDelegateStopGrace = 3 * time.Second
 
 func serveDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateExecutor, slots *delegateSlots, pacer *sendPacer) {
 	sendSlot := slots.send

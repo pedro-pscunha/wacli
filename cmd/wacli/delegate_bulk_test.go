@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -131,8 +132,8 @@ func TestBulkKindsHaveSeparateSlots(t *testing.T) {
 }
 
 // stop must not return while a request still runs: the caller closes the
-// database next. A request that finishes within the grace period is waited
-// for; one that ignores cancellation is abandoned after a bounded wait.
+// database next. A request that honors cancellation returns at once; one that
+// ignores it is abandoned after a bounded wait.
 func TestStopWaitsForInFlightHandlers(t *testing.T) {
 	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
 	storeDir := shortPresenceDelegateStoreDir(t)
@@ -140,7 +141,7 @@ func TestStopWaitsForInFlightHandlers(t *testing.T) {
 	started := make(chan struct{})
 	stop, err := startSendDelegateServerForStore(context.Background(), storeDir, sendSpacing{}, func(ctx context.Context, req sendDelegateRequest) (sendDelegateResponse, error) {
 		close(started)
-		<-release
+		<-release // ignores cancellation
 		return sendDelegateResponse{OK: true}, nil
 	})
 	if err != nil {
@@ -160,32 +161,34 @@ func TestStopWaitsForInFlightHandlers(t *testing.T) {
 	go func() { stop(); close(stopped) }()
 	select {
 	case <-stopped:
-		t.Fatal("stop returned while a request was still running")
+		t.Fatal("stop returned while a request that ignores cancellation was still running")
 	case <-time.After(300 * time.Millisecond):
 	}
 	close(release)
 	select {
 	case <-stopped:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("stop did not return after the request finished")
 	}
 }
 
-// m-f: the server outlives the context it was started with. Cancelling the
-// starting context (as Sync does when it ends) must not cancel a request in
-// flight: only stop does, after the grace period.
-func TestInFlightRequestSurvivesCancellationOfTheStartingContext(t *testing.T) {
+// MAJ-A. The tail of a sync is: the sync context ends, Sync removes the store
+// handler, the command's deferred stop runs, and only then closeApp disconnects.
+// whatsmeow acks an inbound message whether or not a handler is registered, so
+// the time between "handler removed" and "disconnected" is a window in which a
+// message is acked and dropped. A request in flight must not hold that window
+// open: it is cancelled the moment the sync ends. This replays the order with
+// the real server and the real stop, a request that honors cancellation, and an
+// inbound message delivered while the window is open.
+func TestStopDoesNotKeepTheConnectionUpWithoutAStoreHandler(t *testing.T) {
 	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
 	storeDir := shortPresenceDelegateStoreDir(t)
-	startCtx, cancelStart := context.WithCancel(context.Background())
-	release := make(chan struct{})
+	syncCtx, endSync := context.WithCancel(context.Background())
 	started := make(chan struct{})
-	var ctxErrAtFinish error
-	stop, err := startSendDelegateServerForStore(startCtx, storeDir, sendSpacing{}, func(ctx context.Context, req sendDelegateRequest) (sendDelegateResponse, error) {
+	stop, err := startSendDelegateServerForStore(syncCtx, storeDir, sendSpacing{}, func(ctx context.Context, req sendDelegateRequest) (sendDelegateResponse, error) {
 		close(started)
-		<-release
-		ctxErrAtFinish = ctx.Err()
-		return sendDelegateResponse{OK: true}, nil
+		<-ctx.Done() // a send waiting for its ack: it returns when its context ends
+		return sendDelegateResponse{}, ctx.Err()
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -195,26 +198,64 @@ func TestInFlightRequestSurvivesCancellationOfTheStartingContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := json.NewEncoder(conn).Encode(sendDelegateRequest{Version: sendDelegateVersion, Kind: "text", TimeoutMS: 20000}); err != nil {
+	if err := json.NewEncoder(conn).Encode(sendDelegateRequest{Version: sendDelegateVersion, Kind: "text", TimeoutMS: 60000}); err != nil {
 		t.Fatal(err)
 	}
 	<-started
-	cancelStart() // Sync ending
-	time.Sleep(100 * time.Millisecond)
-	stopped := make(chan struct{})
-	go func() { stop(); close(stopped) }()
-	time.Sleep(200 * time.Millisecond)
-	close(release)
-	select {
-	case <-stopped:
-	case <-time.After(3 * time.Second):
-		t.Fatal("stop did not return")
+
+	// The daemon's connection: stored while the handler is registered, acked and
+	// dropped while it is up with no handler.
+	var mu sync.Mutex
+	handlerRegistered, connected := true, true
+	var stored, dropped int
+	deliver := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case !connected:
+		case handlerRegistered:
+			stored++
+		default:
+			dropped++
+		}
 	}
-	if ctxErrAtFinish != nil {
-		t.Fatalf("the request was cancelled by the starting context: %v", ctxErrAtFinish)
+	stopDeliveries := make(chan struct{})
+	deliveriesDone := make(chan struct{})
+	go func() {
+		defer close(deliveriesDone)
+		for {
+			select {
+			case <-stopDeliveries:
+				return
+			case <-time.After(2 * time.Millisecond):
+				deliver()
+			}
+		}
+	}()
+
+	// The sync ends: context cancelled, handler removed, stop, disconnect.
+	endSync()
+	mu.Lock()
+	handlerRegistered = false
+	windowStart := time.Now()
+	mu.Unlock()
+	stop()
+	mu.Lock()
+	connected = false
+	window := time.Since(windowStart)
+	mu.Unlock()
+	close(stopDeliveries)
+	<-deliveriesDone
+
+	if window > 500*time.Millisecond {
+		t.Fatalf("the connection stayed up %v with no store handler; each 2 ms of it can drop a message", window)
 	}
-	var resp sendDelegateResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil || !resp.OK {
-		t.Fatalf("the in-flight request got no answer: %+v err=%v", resp, err)
+	mu.Lock()
+	defer mu.Unlock()
+	// At 2 ms per delivery a window under 500 ms is at most a handful of
+	// messages, and these arrive only while stop is returning, not for the
+	// seconds an in-flight upload used to hold it open.
+	if dropped > int(window/(2*time.Millisecond))+2 {
+		t.Fatalf("dropped %d messages (stored %d) in a %v window", dropped, stored, window)
 	}
 }
