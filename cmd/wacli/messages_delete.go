@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/openclaw/wacli/internal/app"
 	"github.com/openclaw/wacli/internal/out"
@@ -20,6 +19,7 @@ func newMessagesDeleteCmd(flags *rootFlags) *cobra.Command {
 	var id string
 	var forMe bool
 	var deleteMedia bool
+	var newMsgID string
 	postSendWait := postSendRetryReceiptWait
 
 	cmd := &cobra.Command{
@@ -36,103 +36,45 @@ func newMessagesDeleteCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if forMe && newMsgID != "" {
+				return fmt.Errorf("--new-id does not apply to --for-me: delete for me sends no message")
+			}
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			msg, chatJID, err := loadMessageMutationTarget(ctx, a, chat, id)
-			if err != nil {
-				return err
-			}
-			if !forMe {
-				if err := validateMessageCanRevoke(msg); err != nil {
-					return err
-				}
-			} else if err := validateMessageCanDeleteForMe(msg); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			if err := warnRapidSendIfNeeded(a.StoreDir(), time.Now().UTC(), os.Stderr); err != nil {
-				return err
-			}
+			ctx = wa.WithMessageID(ctx, newMsgID)
 			if forMe {
-				info, err := messageInfoForDeleteForMe(msg, chatJID)
+				res, err := callKind[deleteForMeResult](ctx, flags, sendDelegateRequest{
+					Kind: deleteForMeKind, Chat: chat, ID: id, DeleteMedia: deleteMedia,
+					PostSendWaitMS: durationMillis(postSendWait),
+				})
 				if err != nil {
 					return err
 				}
-				if _, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (struct{}, error) {
-					return struct{}{}, a.WA().DeleteMessageForMe(ctx, info, deleteMedia)
-				}); err != nil {
-					return err
-				}
-				mediaPaths, err := a.DB().MessageLocalMediaPaths(msg.ChatJID, msg.MsgID)
-				if err != nil {
-					return fmt.Errorf("load local media paths: %w", err)
-				}
-				deletedMediaCount, deleteMediaErr := deleteLocalMediaPathsIfRequested(deleteMedia, mediaPaths)
-				deletedLocalMedia := deletedMediaCount > 0
-				if deleteMediaErr != nil {
-					if err := a.DB().MarkMessageDeletedForMePreserveMedia(msg.ChatJID, msg.MsgID); err != nil {
-						return fmt.Errorf("store deleted-for-me message state: %w", err)
-					}
-					return fmt.Errorf("delete local media: %w", deleteMediaErr)
-				}
-				if deleteMedia && strings.TrimSpace(msg.LocalPath) != "" {
-					if err := a.DB().ClearMessageLocalMedia(msg.ChatJID, msg.MsgID); err != nil {
-						return fmt.Errorf("clear deleted local media state: %w", err)
-					}
-				}
-				if err := a.DB().MarkMessageDeletedForMe(msg.ChatJID, msg.MsgID, msg.SenderJID, msg.FromMe, time.Now().UTC()); err != nil {
-					return fmt.Errorf("store deleted-for-me message state: %w", err)
-				}
-
-				waitForPostSendRetryReceipts(ctx, postSendWait)
-
 				if flags.asJSON {
 					return out.WriteJSON(os.Stdout, map[string]any{
 						"deleted_for_me": true,
-						"to":             chatJID.String(),
-						"target":         msg.MsgID,
-						"deleted_media":  deletedLocalMedia,
+						"to":             res.To,
+						"target":         res.Target,
+						"deleted_media":  res.DeletedMedia,
 					})
 				}
-				fmt.Fprintf(os.Stdout, "Deleted message %s for me in %s\n", msg.MsgID, chatJID.String())
+				fmt.Fprintf(os.Stdout, "Deleted message %s for me in %s\n", res.Target, res.To)
 				return nil
 			}
-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
-				return a.WA().RevokeMessage(ctx, chatJID, types.MessageID(msg.MsgID))
+			res, err := callKind[revokeResult](ctx, flags, sendDelegateRequest{
+				Kind: revokeKind, Chat: chat, ID: id, NewID: newMsgID, Strict: true,
+				PostSendWaitMS: durationMillis(postSendWait),
 			})
 			if err != nil {
 				return err
 			}
-			if err := a.DB().MarkMessageRevoked(msg.ChatJID, msg.MsgID); err != nil {
-				return fmt.Errorf("store deleted message state: %w", err)
-			}
-
-			waitForPostSendRetryReceipts(ctx, postSendWait)
-
-			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{
-					"revoked": true,
-					"to":      chatJID.String(),
-					"id":      sentID,
-					"target":  msg.MsgID,
-				})
-			}
-			fmt.Fprintf(os.Stdout, "Deleted message %s in %s (id %s)\n", msg.MsgID, chatJID.String(), sentID)
-			return nil
+			return writeRevokeOutput(flags, res, "Deleted")
 		},
 	}
+	cmd.Flags().StringVar(&newMsgID, "new-id", "", "caller-chosen WhatsApp message ID for the revoke message (8-64 letters or digits; default: random)")
 	cmd.Flags().StringVar(&chat, "chat", "", "chat JID, phone number, or contact/group/chat name")
 	cmd.Flags().StringVar(&id, "id", "", "message ID to delete")
 	cmd.Flags().BoolVar(&forMe, "for-me", false, "delete the message only for this WhatsApp account")
@@ -144,6 +86,7 @@ func newMessagesDeleteCmd(flags *rootFlags) *cobra.Command {
 func newMessagesRevokeCmd(flags *rootFlags) *cobra.Command {
 	var chat string
 	var id string
+	var newMsgID string
 	postSendWait := postSendRetryReceiptWait
 
 	cmd := &cobra.Command{
@@ -157,67 +100,42 @@ func newMessagesRevokeCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			msg, chatJID, found, err := loadMessageRevokeTarget(ctx, a, chat, id)
-			if err != nil {
-				return err
-			}
-			if found {
-				if err := validateMessageCanRevoke(msg); err != nil {
-					return err
-				}
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			if err := warnRapidSendIfNeeded(a.StoreDir(), time.Now().UTC(), os.Stderr); err != nil {
-				return err
-			}
-			targetID := id
-			if found {
-				targetID = msg.MsgID
-			}
-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
-				return a.WA().RevokeMessage(ctx, chatJID, types.MessageID(targetID))
+			ctx = wa.WithMessageID(ctx, newMsgID)
+			res, err := callKind[revokeResult](ctx, flags, sendDelegateRequest{
+				Kind: revokeKind, Chat: chat, ID: id, NewID: newMsgID,
+				PostSendWaitMS: durationMillis(postSendWait),
 			})
 			if err != nil {
 				return err
 			}
-			if found {
-				if err := a.DB().MarkMessageRevoked(msg.ChatJID, msg.MsgID); err != nil {
-					return fmt.Errorf("store deleted message state: %w", err)
-				}
-			}
-
-			waitForPostSendRetryReceipts(ctx, postSendWait)
-
-			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{
-					"revoked": true,
-					"to":      chatJID.String(),
-					"id":      sentID,
-					"target":  id,
-				})
-			}
-			fmt.Fprintf(os.Stdout, "Revoked message %s in %s (id %s)\n", id, chatJID.String(), sentID)
-			return nil
+			return writeRevokeOutput(flags, res, "Revoked")
 		},
 	}
+	cmd.Flags().StringVar(&newMsgID, "new-id", "", "caller-chosen WhatsApp message ID for the revoke message (8-64 letters or digits; default: random)")
 	cmd.Flags().StringVar(&chat, "chat", "", "chat JID or phone number")
 	cmd.Flags().StringVar(&id, "id", "", "message ID to revoke")
 	cmd.Flags().DurationVar(&postSendWait, "post-send-wait", postSendRetryReceiptWait, "keep the connection alive after revoke so retry receipts can be handled (0 disables)")
 	return cmd
+}
+
+func writeRevokeOutput(flags *rootFlags, res revokeResult, verb string) error {
+	if flags.asJSON {
+		body := map[string]any{
+			"revoked": true,
+			"to":      res.To,
+			"id":      res.ID,
+			"target":  res.Target,
+		}
+		addSendMetaFields(body, res.sendMeta)
+		return out.WriteJSON(os.Stdout, body)
+	}
+	fmt.Fprintf(os.Stdout, "%s message %s in %s (id %s)\n", verb, res.Target, res.To, res.ID)
+	return nil
 }
 
 func loadMessageRevokeTarget(ctx context.Context, a *app.App, chat, id string) (store.Message, types.JID, bool, error) {

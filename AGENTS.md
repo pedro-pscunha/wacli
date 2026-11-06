@@ -18,13 +18,13 @@
 - **FTS5 table** is a separate trigger-synced table in `wacli.db`; requires `-tags sqlite_fts5` at build time.
 - **Store lock**: a `LOCK` file in the store dir is acquired before any write operation; `--lock-wait` controls the wait timeout.
 - **Read-only mode**: `--read-only` flag or `WACLI_READONLY=1` env; write commands exit immediately with a clear error.
-- **Send retry**: bounded 45 s attempt timeout; retries once after reconnect for stale-session / usync-timeout errors.
+- **Send retry**: bounded 2 min attempt timeout (upload + send); retries once after reconnect for stale-session / usync-timeout errors.
 - **Store path precedence**: `--store` flag → `WACLI_STORE_DIR` env → XDG `~/.local/state/wacli` on Linux (legacy `~/.wacli` fallback) → `~/.wacli` elsewhere.
 
 ## Build, Test, and Development Commands
 - Build: `pnpm build` — compiles with `-tags sqlite_fts5` and `CGO_CFLAGS=-Wno-error=missing-braces` (required for GCC 15+).
 - Run: `pnpm wacli -- <args>` — rebuilds then runs.
-- Test: `pnpm test` — runs plain and FTS Go tests, the Windows lock cross-compile, cgo-required build check, and Node documentation/release-script tests.
+- Test: `pnpm test` — runs plain and FTS Go tests, the Windows lock/store test cross-compiles, cgo-required build check, and Node documentation/release-script tests.
 - Lint: `pnpm lint` — `go vet ./...`; `make lint` also runs vulnerability checks and `pnpm lint:deadcode` for production and test reachability.
 - Format fix: `pnpm format` — `gofmt -w .`.
 - Format check: `pnpm format:check` — fails if any file would change.
@@ -41,6 +41,7 @@
 - FTS-sensitive tests must run under `-tags sqlite_fts5`; non-FTS path tests must also pass without the tag.
 - Use `fake_wa_test.go` / table-driven tests for whatsmeow interaction; avoid hitting real WhatsApp in unit tests.
 - Integration tests that need a live account are opt-in and not part of the standard gate.
+- Local retrieval CLI scenarios: `WACLI_RETRIEVAL_ARTIFACTS=/outside/repository/artifacts go test ./internal/app -run '^TestRetrievalStage[123]CLI$' -count=1` (repeat with `-tags sqlite_fts5`). These build and execute the real CLI against disposable stores and save per-scenario transcripts.
 
 ## Commit & Pull Request Guidelines
 - Follow Conventional Commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `security:`, `ci:` with an imperative summary.

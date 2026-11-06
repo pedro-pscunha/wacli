@@ -35,28 +35,11 @@ func newChannelsListCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[channelsListResult](ctx, flags, sendDelegateRequest{Kind: channelsListKind})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			list, err := a.WA().GetSubscribedNewsletters(ctx)
-			if err != nil {
-				return err
-			}
-			rows := channelRecords(list)
-			if err := persistChannelRecords(a.DB(), rows); err != nil {
-				return err
-			}
+			rows := res.Channels
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, rows)
@@ -96,35 +79,11 @@ func newChannelsInfoCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[channelRecordResult](ctx, flags, sendDelegateRequest{Kind: channelsInfoKind, Chat: jidStr})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			jid, err := parseChannelJID(jidStr)
-			if err != nil {
-				return err
-			}
-			meta, err := a.WA().GetNewsletterInfo(ctx, jid)
-			if err != nil {
-				return err
-			}
-			if meta == nil {
-				return fmt.Errorf("channel not found")
-			}
-			row := channelRecordFromMeta(meta)
-			if err := persistChannelRecords(a.DB(), []channelRecord{row}); err != nil {
-				return err
-			}
+			row := res.Channel
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, row)
@@ -161,34 +120,11 @@ func newChannelsJoinCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[channelRecordResult](ctx, flags, sendDelegateRequest{Kind: channelsJoinKind, Code: invite})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			meta, err := a.WA().GetNewsletterInfoWithInvite(ctx, strings.TrimSpace(invite))
-			if err != nil {
-				return err
-			}
-			if meta == nil {
-				return fmt.Errorf("could not resolve channel from invite")
-			}
-			if err := a.WA().FollowNewsletter(ctx, meta.ID); err != nil {
-				return err
-			}
-			row := channelRecordFromMeta(meta)
-			if err := persistChannelRecords(a.DB(), []channelRecord{row}); err != nil {
-				return err
-			}
+			row := res.Channel
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"joined": true, "channel": row})
@@ -215,27 +151,11 @@ func newChannelsLeaveCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[channelLeaveResult](ctx, flags, sendDelegateRequest{Kind: channelsLeaveKind, Chat: jidStr})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			jid, err := parseChannelJID(jidStr)
-			if err != nil {
-				return err
-			}
-			if err := a.WA().UnfollowNewsletter(ctx, jid); err != nil {
-				return err
-			}
+			jid, _ := parseChannelJID(res.JID)
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"left": true, "jid": jid.String()})

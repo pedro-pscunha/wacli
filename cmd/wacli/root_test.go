@@ -150,10 +150,101 @@ func TestResolveStoreDirEnvBeatsDefaultAccount(t *testing.T) {
 	}
 }
 
+func TestResolveStoreDirAccountsWithoutDefaultRequireAccount(t *testing.T) {
+	isolateAccountConfigHome(t)
+	cfgPath := config.DefaultConfigPath()
+	cfg := &config.AccountsConfig{
+		Accounts: map[string]config.AccountEntry{
+			"work":     {Store: "accounts/work"},
+			"personal": {Store: "accounts/personal"},
+		},
+	}
+	if err := config.SaveAccountsConfig(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveStoreDir(&rootFlags{})
+	if err == nil || !strings.Contains(err.Error(), "pass --account (one of: personal, work)") {
+		t.Fatalf("resolveStoreDir error = %v, want a refusal that names the accounts", err)
+	}
+	got, err := resolveStoreDir(&rootFlags{account: "personal"})
+	if err != nil {
+		t.Fatalf("resolveStoreDir --account: %v", err)
+	}
+	if want := filepath.Join(filepath.Dir(cfgPath), "accounts", "personal"); got != want {
+		t.Fatalf("storeDir = %q, want %q", got, want)
+	}
+	envStore := filepath.Join(t.TempDir(), "env-store")
+	t.Setenv(config.EnvStoreDir, envStore)
+	if got, err := resolveStoreDir(&rootFlags{}); err != nil || got != envStore {
+		t.Fatalf("storeDir = %q, %v; want the WACLI_STORE_DIR store", got, err)
+	}
+}
+
+func TestResolveStoreDirNoConfigUsesBaseStore(t *testing.T) {
+	isolateAccountConfigHome(t)
+	got, err := resolveStoreDir(&rootFlags{})
+	if err != nil {
+		t.Fatalf("resolveStoreDir: %v", err)
+	}
+	if want, _ := filepath.Abs(config.DefaultStoreDir()); got != want {
+		t.Fatalf("storeDir = %q, want %q", got, want)
+	}
+}
+
 func isolateAccountConfigHome(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Setenv(config.EnvStoreDir, "")
+}
+
+func TestRootFlagsDelegateOnly(t *testing.T) {
+	if (&rootFlags{}).isDelegateOnly() {
+		t.Fatal("isDelegateOnly = true by default")
+	}
+	if !(&rootFlags{delegateOnly: true}).isDelegateOnly() {
+		t.Fatal("flag not honored")
+	}
+	t.Setenv("WACLI_DELEGATE_ONLY", "1")
+	if !(&rootFlags{}).isDelegateOnly() {
+		t.Fatal("env not honored")
+	}
+	if (&rootFlags{isDaemon: true}).isDelegateOnly() {
+		t.Fatal("the sync daemon must stay allowed to connect")
+	}
+}
+
+func TestSyncOnceRefusedWhenDelegateOnly(t *testing.T) {
+	store := t.TempDir()
+	err := execute([]string{"--store", store, "--delegate-only", "sync", "--once"})
+	if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWriteCommandsRefusedWithoutDaemonWhenDelegateOnly(t *testing.T) {
+	cases := [][]string{
+		{"send", "text", "--to", "5511999999999", "--message", "x"},
+		{"send", "file", "--to", "5511999999999", "--file", "/nonexistent"},
+		{"send", "react", "--to", "5511999999999", "--id", "ABC", "--reaction", "x"},
+		{"messages", "edit", "--chat", "5511999999999", "--id", "ABC", "--message", "x"},
+		{"presence", "typing", "--to", "5511999999999"},
+		{"labels", "create", "--name", "x"},
+	}
+	for _, c := range cases {
+		store := t.TempDir()
+		args := append([]string{"--store", store, "--delegate-only"}, c...)
+		err := execute(args)
+		if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+			t.Fatalf("%v: err = %v, want delegate-only refusal", c, err)
+		}
+		for _, name := range []string{"session.db", "wacli.db", "LOCK"} {
+			if _, statErr := os.Stat(filepath.Join(store, name)); statErr == nil {
+				t.Errorf("%v: %s was created by a refused call", c, name)
+			}
+		}
+	}
 }

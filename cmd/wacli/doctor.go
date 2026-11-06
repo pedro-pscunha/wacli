@@ -100,9 +100,7 @@ func doctorStoreStatsFromStoreStats(stats store.StoreStats) doctorStoreStats {
 		Contacts:   stats.Contacts,
 		Groups:     stats.Groups,
 	}
-	if stats.LastMessageTS > 0 {
-		out.LastSyncAt = time.Unix(stats.LastMessageTS, 0).UTC().Format(time.RFC3339)
-	}
+
 	return out
 }
 
@@ -226,6 +224,15 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					}
 				}
 			}
+			if lockHeld && !connect && !flags.isReadOnly() {
+				// The daemon knows whether its connection is up; the lock alone cannot say.
+				if resp, derr := delegateSend(ctx, flags, sendDelegateRequest{Kind: doctorKind}); derr == nil && len(resp.Data) > 0 {
+					var live doctorLive
+					if json.Unmarshal(resp.Data, &live) == nil {
+						authed, connected, linkedJID = live.Authed, live.Connected, live.LinkedJID
+					}
+				}
+			}
 			sessionRevoked, sessionStateErr := appPkg.SessionRevoked(storeDir)
 			if sessionStateErr != nil && storeErr == "" {
 				storeErr = sessionStateErr.Error()
@@ -246,6 +253,11 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 				if raw, err := db.Stats(); err == nil {
 					converted := doctorStoreStatsFromStoreStats(raw)
 					stats = &converted
+					if synced, err := db.LastSuccessfulSync(); err != nil {
+						storeErr = err.Error()
+					} else if synced != nil {
+						stats.LastSyncAt = synced.UTC().Format(time.RFC3339)
+					}
 				} else if storeErr == "" {
 					storeErr = err.Error()
 				}

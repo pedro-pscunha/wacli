@@ -45,7 +45,7 @@ or delete anything from WhatsApp servers. Use --dry-run to preview targets.`,
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newLocalApp(ctx, flags, false)
 			if err != nil {
 				return err
 			}

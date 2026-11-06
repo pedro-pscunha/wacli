@@ -2,14 +2,97 @@
 
 ## Unreleased
 
-- Session: close the WhatsApp SQLite container on permanent shutdown and initialization failure, while keeping temporary reconnects usable and draining pending app-state persistence before closing either database.
-- Store: return failure when bulk chat/group cleanup cannot delete selected rows, preserving successful deletions and reporting the underlying errors instead of emitting a successful JSON result.
-- CLI: keep libsignal diagnostics off stdout, preserve warnings and errors safely on stderr, and emit them as NDJSON warnings with `--events` without exposing raw cryptographic payloads. (#418, #419 - thanks @shishiv)
+- Delegate: `contacts alias set|rm` and `contacts tags add|rm` are daemon kinds (`contact_alias`, `contact_tag`). They only write the local store, so with a daemon listening the CLI sends them to it, and with none they run locally under the lock, even on a pinned store and even under `--delegate-only` (that flag is about connections, and these never connect). Alias and tag are trimmed, at most 100 characters, no control characters. Both skip the send queue.
+- A send with `--id`, via the daemon and on a command's own connection, writes a pending row before the wire send. Whether an outcome is unknown is decided by phase (a mark set right before `SendMessage`; an error after it is unknown except the server's own error reply), not by error text. A retry that finds an unfinished row answers `resultado_incerto` (exit status 75, `outcome_unknown` and `code` in the JSON error) and does not resend; a send whose store write failed answers `already_sent`; the same id for a different message answers `id_reused`. `wacli pending-sends list|clear` manages the rows. One id per message (action x recipient). A from-me hit for the id anywhere answers `already_sent` with the stored chat and a `target_mismatch` warning. The fork's migrations are numbered 1001 (own message id index) and 1002 (`pending_sends`), outside upstream's range; a store that applied the earlier 33 and 34 of this branch is renumbered. An older binary ignores both. `auth --follow` is refused on a pinned store.
+- Delegate-only is now pinnable per store: a `.delegate-only` file in the store or `delegate_only: true` on the account in `config.yaml`. A delegate-only call dials the daemon's socket first and refuses without taking the store lock or opening `wacli.db`. `wacli devices` no longer falls back to its own connection. `capabilities` lists the feature `store_pin`. Local maintenance commands work on a pinned store while the daemon is down. The marker is the form for air; the config key makes any older binary reject the whole config.
+- Delegate: every command that wrote to or read from WhatsApp on its own connection now has a daemon kind with the same validation on both sides: `messages forward|revoke|delete`, all `groups` commands that connect, `profile` set/get, `history backfill`, `media backfill`, `labels list` and `channels list|info|join|leave`. `doctor` asks the daemon for its live connection state when it holds the lock. `auth *` never delegates. `history backfill` runs on the daemon's connection (`BackfillHistoryLive`) and stores messages through the normal history path. Backfills use their own slot. `--new-id` sets the produced message id. The answer rides in the additive response field `data`; protocol stays 1 and `capabilities` lists the kinds and the features `new_id` and `already_sent`.
+- Delegate: add `--delegate-only` (env `WACLI_DELEGATE_ONLY=1`). A command that would connect to WhatsApp uses the running sync daemon, or fails with `daemon not running; refusing to connect outside the sync daemon`. Only `sync --follow` may connect. A second connection acks messages it never stores. `sync --once` and `auth logout` are refused too. `auth` login is exempt like `sync --follow`: it runs the full sync with the store handler, so what it receives is stored, and the store lock keeps it off a store a daemon holds. A pinned store stays re-pairable without touching the pin.
+- Send: a retry with a `--id` that was already sent and stored answers `already_sent` and does not send again. When an older daemon ignores `--id`, the CLI reports the message as sent under the id it really got, with a warning, never as an error.
+- Send: add a caller-chosen message ID, `--id` on every send kind (`--new-id` on react, select, edit and poll vote), carried over the socket as `new_id`. A client refuses a send that an older daemon made with a random ID.
+- Delegate: add the read-only kinds `devices` (linked devices) and `capabilities` (version, socket protocol, accepted kinds), with `wacli devices` and `wacli capabilities`. Socket protocol stays 1.
+- Send: raise the per-attempt timeout (upload plus send) from 45 seconds to 2 minutes, so a large document (an 89 MB video sent `--as document`) no longer times out mid-upload.
+- Accounts: with accounts in `config.yaml` and no `default_account`, a command without `--account`, `--store` or `WACLI_STORE_DIR` fails and names the accounts, instead of using the base store (empty on a multi-account host, so a read answered nothing). `accounts add` sets the default only for the first account.
+- Labels: add `labels list|create|rename|delete|attach|detach`, delegate writes through the running sync daemon outside the send queue (like upstream's chat-state kind), key DM memberships on the LID, and merge phone/LID forms when listing.
+- Sync: on an LTHash mismatch request the phone recovery snapshot first and fall back to a full refresh, raise each repair step's timeout to 2 minutes, and admit a new repair after every successful one instead of once per run. A key shared without data keeps upstream's full-refresh path. Stop forcing a full refresh of `regular` on connect. Label writes run the chat-state pre-write sync so a lagging `regular` version no longer fails with a 409 conflict. A pre-write sync that hits a mismatch asks for the snapshot first too; upstream's degraded incremental replay of a pending intent (#490) is kept as is. A pending intent replayed at startup asks for the snapshot first when the collection's full sync is known not to verify (#490's flag), instead of a full refresh that would only delete its local version.
+
+## 0.22.0 - 2026-10-16
+
+**Highlights:** bounded message search context and cursor reads, a content-free incremental journal, safer sends and chat recovery, and five networking security fixes.
+
+- Messages: add bounded chronological search context and exact local chat/contact name filters with explicit ambiguity errors.
+- Messages: add bounded cursor reads for list, search, and export, with explicit archive invalidation and shared successful-sync freshness.
+- Messages: add a content-free incremental journal, bounded drains, retention expiry, and identity reconciliation.
+- Dependencies: update Go networking, crypto, terminal, protocol and parser modules, pnpm 12.13.0, and the dead-code checker after the 48-hour cooldown; fix five reachable x/net advisories while retaining Go and Node minimums.
+- Chats: add an exact inbound mark-read boundary that preserves newer unread work through receipts, sync echoes, and recovery replay. Thanks @artemgetmann (#488).
+- Chats: let `mark-read --receipts` clear local unread metadata when no eligible incoming message is stored, report the zero-receipt result as local-only, and preserve arrivals during the clear. Thanks @nicolasbiondic (#491).
+- Media: reuse verified cached downloads and add bounded exact phone recovery through the running sync owner. Thanks @artemgetmann (#482).
+- Send: avoid fresh message retries after ambiguous disconnects while retaining safe lookup and presence retries. Thanks @artemgetmann (#483).
+- Send: retain native quote IDs and canonical sender identities in immediate text and attachment history, and save attachments under the canonical recipient. Thanks @artemgetmann (#485, #486).
+- Messages: preserve exact raw text, captions, and edits, including surrounding whitespace. Thanks @artemgetmann (#484).
+- Sync: count the first decoded group payload after a protocol placeholder once and preserve it across empty protocol replays without discarding explicit empty edits. Thanks @artemgetmann (#487).
+- Chats: finish an app-state recovery the primary answers after the waiter timed out, persisting the late snapshot and clearing that attempt's replay markers. Thanks @nicolasbiondic (#489).
+- Chats: on collections whose full sync is known not to verify, let chat-state writes proceed after an incremental sync instead of a failing full replay and a five-minute wait for the phone; only the pre-write attempt marker is cleared, while older recovery intents and each write's post-send intent are kept until a verified full replay or a primary recovery snapshot covers them. Thanks @nicolasbiondic (#490).
+- Release: expose the shared workflow’s nonpublishing dry run for dependency and toolchain verification.
+
+## 0.21.0 - 2026-10-11
+
+**Highlights:** opt-in full-history pairing, live presence events, media retry filters, and Go standard-library security fixes.
+
+- Auth: add opt-in full-history pairing and history day, per-chat, and size limits, with validation before creating named accounts. Thanks @zarmat99 (#442, #461).
+- Presence: add contact subscriptions and presence/typing events, with bounded reconnect renewal and sync delegation. Thanks @zarmat99 (#451).
+- Messages: retain per-recipient delivery/read receipts and expose counts in message queries, preserving identities through phone/LID reconciliation. Thanks @zarmat99 (#440).
+- Media: add `media retry --type` to recover one kind of media, including voice notes with `--type audio`, while applying chat/date filters and row limits to matching messages. Thanks @zarmat99 (#450).
+- Contacts: delegate `contacts check` to a running `sync --follow` process so registration lookups no longer fail on the store lock. Thanks @ceifa (#453, #425).
+- Builds: use Go 1.27.2 for its standard-library security fixes across development, CI, Docker, and release verification, retaining the Go 1.27.0 source minimum.
+- CI: attribute vulnerability findings to the vulnerable module rather than its callers, preserving standard-library failures and separate third-party notices.
+- Dependencies: refresh whatsmeow, eligible Go modules, and pnpm 12.10.1 after the 48-hour cooldown; retain Go and Node minimums.
+- Dependencies: update pnpm to 12.9.1, the dead-code checker to x/tools 0.51.0, and PostgreSQL and GraphQL tooling parsers after the 48-hour cooldown, preserving Go and Node minimums.
+- Docs: explain read-only MCP wrappers, command mapping, store locks, media output, and local health checks. Thanks @wacli-me (#434).
+- Release: verify the macOS 15.0 minimum on every Darwin binary slice before signing and publication.
+
+## 0.20.0 - 2026-09-30
+
+**Highlights:** offline phone/LID resolution, confined uploads, authenticated media retries, and chat-state commands alongside sync.
+
+- Contacts: add offline `contacts resolve` for verified phone/LID pairs, with explicit unresolved results and read-only access alongside sync. Thanks @tsavo-at-pieces (#458).
+- Send: add opt-in `WACLI_MEDIA_ROOTS` upload confinement, including symlink-aware CLI validation and confined file reads in sync daemons. Thanks @tsavo-at-pieces (#459).
+- Media: recover authenticated retry uploads without reusing stale ciphertext hashes, while retaining HMAC, plaintext digest, and size verification. Thanks @danielfadul1-pixel (#462).
+- Chats: delegate archive, pin, mute, and their inverses to a running sync without blocking the send queue, while preserving caller deadlines. Thanks @nicolasbiondic (#454).
+- History: retry unanswered one-to-one backfill with the chat’s verified alternate phone/LID identity and reuse the identity that responds. Thanks @tsavo-at-pieces (#457, #444).
+- Sync: enable bounded primary-device rerequests for eligible decryption failures and report unreadable messages with accurate recovery caveats. Thanks @zarmat99 (#441).
+- Sync: recover collections that require explicitly empty app-state keys while preserving ordinary key delivery and one-shot chat-state writes. Thanks @jzmudzinski (#443).
+- Sync: apply this account’s ordinary read receipts to local unread state so chats read on the phone are reflected locally with read receipts enabled. Thanks @zarmat99 (#439).
+- Sync: reuse group information and participant snapshots instead of requesting them twice per message; invalidate on group changes and reconnects, and retry failed snapshot writes. Thanks @zarmat99 (#447).
+- Sync: enforce caller deadlines for queued delegated operations even without send spacing, and warn against retrying ambiguous timeouts. Thanks @tsavo-at-pieces (#456, #446).
+- Store: avoid scanning the full search index on open and sorting entire phone/LID histories for limited message reads. Thanks @zarmat99 (#455).
+- Tests: compile store tests on Windows and isolate account tests from the real Windows home directory; keep both regressions in the normal gate. Thanks @parth-garg01 (#452, #448, #449).
+- Dependencies: update pnpm to 12.8.1 and refresh Google API/RPC protocol modules after the 48-hour cooldown, preserving runtime minimums.
+- Dependencies: update gRPC tooling dependencies and pnpm to eligible minor releases while retaining the Go/Node minimums and 48-hour package cooldown.
+
+## 0.19.0 - 2026-09-24
+
+**Highlights:** opt-in read receipts without app-state recovery, accurate unread counts, and stable chat activity order.
+
+- Chats: add opt-in `mark-read --receipts` through an independent network path, with bounded batches, safe unread boundaries, sync delegation, and privacy-aware outcome reporting. Thanks @zarmat99 and @Adi-A (#432, #433).
+- Sync: preserve messages beyond replayed read boundaries, keep read counts monotonic, resolve same-second boundaries by message ID, and exclude system events, reactions, and revocations from new unread counts. Thanks @zarmat99 (#435).
+- Sync: keep content-free system events out of chat activity order and rebuild matching existing activity timestamps from stored content. Thanks @zarmat99 (#436).
+
+## 0.18.3 - 2026-09-21
+
+**Highlights:** webhooks omit media keys, backfill follows verified phone/LID identities, and sync recovery survives interruptions.
+
+- Security: omit attachment decryption keys and retrieval fields from media webhooks while preserving descriptive metadata and local downloads. (#417 - thanks @hchittanuru3)
+- History and contacts: resolve verified phone/LID pairs for backfill requests and contact lookup, preserve alias/tag edits through either identity, and keep opaque LIDs out of phone fields. (#427 - thanks @ugoi)
+- History: wait for response persistence before checking backfill progress, preventing an asynchronous reply from stopping a multi-batch backfill early.
 - Sync: decrypt encrypted message edits in live/history sync and bind updates to the authenticated sender, chat, and target. (#362, #363 - thanks @goutamadwant)
-- Messages: index associated-child and group-status-mention content and group-invite captions during live/history sync. (#365)
 - Sync: repair LTHash mismatches with a durable full refresh before bounded phone recovery, and replay interrupted recovery at startup. (#367, #382 - thanks @shishiv)
+- Messages: index associated-child and group-status-mention content and group-invite captions during live/history sync. (#365 - thanks @natea)
 - Auth: retain observed session revocation in auth/doctor diagnostics until confirmed login, and wait for login confirmation before reporting a successful diagnostic connection. (#389 - thanks @0xble)
-- Builds: update pnpm to 12.4.1, share production/test dead-code checks between local and CI gates, validate documentation links in CI, and isolate concurrent Windows lock cross-builds.
+- CLI: keep libsignal diagnostics off stdout, preserve warnings and errors safely on stderr, and emit them as NDJSON warnings with `--events` without exposing raw cryptographic payloads. (#418, #419 - thanks @shishiv)
+- Store: return failure when bulk chat/group cleanup cannot delete selected rows, preserving successful deletions and reporting the underlying errors instead of emitting a successful JSON result.
+- Session: close the WhatsApp SQLite container on permanent shutdown and initialization failure, while keeping temporary reconnects usable and draining pending app-state persistence before closing either database.
+- Dependencies: refresh WhatsApp protocol handling, Go modules, pnpm, GoReleaser, and Docker images; keep the Go and Node source requirements unchanged.
+- Builds: share production/test dead-code checks between local and CI gates, validate documentation links in CI, isolate concurrent Windows lock cross-builds, and allow Go module maintenance while keeping CGO-disabled builds rejected.
 
 ## 0.18.2 - 2026-09-11
 

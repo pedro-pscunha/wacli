@@ -17,6 +17,7 @@ func newContactsCmd(flags *rootFlags) *cobra.Command {
 	}
 	cmd.AddCommand(newContactsSearchCmd(flags))
 	cmd.AddCommand(newContactsShowCmd(flags))
+	cmd.AddCommand(newContactsResolveCmd(flags))
 	cmd.AddCommand(newContactsCheckCmd(flags))
 	cmd.AddCommand(newContactsRefreshCmd(flags))
 	cmd.AddCommand(newContactsImportSystemCmd(flags))
@@ -41,7 +42,7 @@ func newContactsSearchCmd(flags *rootFlags) *cobra.Command {
 			}
 			defer closeApp(a, lk)
 
-			cs, err := a.DB().SearchContacts(args[0], limit)
+			cs, err := searchContactsForDisplay(ctx, a, args[0], limit)
 			if err != nil {
 				return err
 			}
@@ -87,7 +88,7 @@ func newContactsShowCmd(flags *rootFlags) *cobra.Command {
 			}
 			defer closeApp(a, lk)
 
-			c, err := a.DB().GetContact(jid)
+			c, err := getContactForDisplay(ctx, a, jid)
 			if err != nil {
 				return err
 			}
@@ -134,7 +135,7 @@ func newContactsRefreshCmd(flags *rootFlags) *cobra.Command {
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 
-			a, lk, err := newApp(ctx, flags, true, true)
+			a, lk, err := newLocalApp(ctx, flags, true)
 			if err != nil {
 				return err
 			}
@@ -193,16 +194,12 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, Alias: alias, SubAction: "set"})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-			if err := a.DB().SetAlias(jid, alias); err != nil {
-				return err
-			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "alias": alias})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "alias": res.Alias})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil
@@ -221,16 +218,15 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			// --alias is a persistent flag of the alias command, so it parses on rm too; pass it on so the
+			// validator refuses it instead of dropping it silently.
+			alias, _ := cmd.Flags().GetString("alias")
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, Alias: alias, SubAction: "rm"})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-			if err := a.DB().RemoveAlias(jid); err != nil {
-				return err
-			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "removed": true})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "removed": true})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil
@@ -261,16 +257,12 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "add"})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-			if err := a.DB().AddTag(jid, tag); err != nil {
-				return err
-			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "tag": tag})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "tag": res.Tag})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil
@@ -290,16 +282,12 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "rm"})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-			if err := a.DB().RemoveTag(jid, tag); err != nil {
-				return err
-			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "tag": tag, "removed": true})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "tag": res.Tag, "removed": true})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil

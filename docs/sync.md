@@ -24,7 +24,18 @@ wacli sync [--once] [--follow] [--idle-exit 30s] [--max-reconnect 5m] [--stale-t
 - `--max-messages N` stops before storing more than `N` total messages locally.
 - `--max-db-size SIZE` stops when `wacli.db` plus SQLite sidecars reaches `SIZE` (`500MB`, `2GB`, etc.).
 - `--download-media` runs a bounded media downloader for sync events. Clean one-shot and bootstrap runs finish queued downloads before exiting; cancellation, errors, and storage-limit exits stop immediately.
-- `--send-spacing DURATION|MIN-MAX` paces serialized operations delegated to a running follow process. A single duration such as `2s` sets a fixed minimum gap; a range such as `500ms-5s` chooses a fresh random gap for each operation. It is disabled by default, so unset behavior remains unchanged. The caller's command timeout includes time queued behind earlier operations, pacing, and the operation itself; a request that times out before dispatch is not dispatched. Delegated `chats mark-read` and `chats mark-unread` share this queue and timeout budget.
+- `--send-spacing DURATION|MIN-MAX` paces serialized operations delegated to a running follow process. A single duration such as `2s` sets a fixed minimum gap; a range such as `500ms-5s` chooses a fresh random gap for each operation. It is disabled by default. With or without pacing, the caller's command timeout includes time queued behind earlier operations, pacing, and the operation itself; a request that is still queued when its caller's deadline is reached is refused with an explicit "it was not sent" error and is never dispatched later (#446). If the caller times out waiting for a reply after dispatch, the error says the operation may still have gone through, so check before retrying. Delegated `chats mark-read`, `chats mark-unread`, and `contacts check` share this queue and timeout budget; delegated archive, pin, and mute changes skip the queue and pacing but keep the same timeout budget.
+- Recommended `--send-spacing` for a daemon that serves several people's work sends: `3s-8s`. The gap is measured from the end of the previous operation, so a slow upload does not count toward it. It paces only the serialized queue (text, file, voice, sticker, react, location, poll, edit, mark-read, contacts check). App-state writes, presence subscribe, `devices` and `capabilities` skip it. A request still waiting when its caller's `--timeout` ends is refused as "not sent", so give a caller `--timeout` of at least the queue depth times 8s.
+- `--delegate-only` (or `WACLI_DELEGATE_ONLY=1`) on any other command makes it use this daemon or fail with `daemon not running; refusing to connect outside the sync daemon`. Without it, a command that finds the store lock free opens its own connection, which acks messages it never stores. A call that depends on a flag or an environment line is one forgotten line from the original loss, so pin the store.
+  - **The marker is the form to use on air.** `touch <store>/.delegate-only` for each work account's store (`wacli accounts list` names them). It makes every command on that store delegate-only, with no flag and no restart. A binary that predates the marker ignores it and keeps connecting, so install the new binary first and check `wacli capabilities --json` lists the feature `store_pin`. A marker the process cannot stat for any reason other than "does not exist" counts as pinned.
+  - **The config key is for a single-binary host.** `delegate_only: true` on the account in `config.yaml` does the same, but the config is parsed strictly: a binary older than this feature rejects the whole file, for every account and every command, `sync --follow` included. A rollback of the binary on a host that uses the key takes every daemon down, and a systemd restart loop backs off for up to an hour. Do not use the key where a rollback is possible, and take stray older `wacli` binaries off the PATH of a host that pins stores.
+  - Exempt: `sync --follow`, and `auth` login, which runs the full sync with the store handler (so a pinned store is re-paired with the marker in place); the store lock keeps both off a store a running daemon holds. Refused: `sync --once`, `auth logout`, `doctor --connect`, and every send, group, profile, channel, label and backfill command without a daemon.
+  - Local maintenance (`store cleanup`, `messages purge`, `chats cleanup`, `groups prune`, `contacts ...`) never connects: with the daemon down it takes the lock as usual, with the daemon running it asks you to stop the daemon.
+  - The check dials the daemon's socket first and, with none listening, refuses before it takes the store lock or opens `wacli.db`, so a refused retry cannot block the daemon's restart.
+  - `auth --follow` is refused on a pinned store: it would act as a daemon with no delegate socket, so every delegated call would fail while it runs. Stop the unit (`systemctl --user stop <wacli-sync unit>`), pair without `--follow`, then start the unit.
+  - To lift the pin for a one-off repair, remove the file with the daemon stopped.
+  - Health check for "every store is pinned": `for d in <every store dir>; do test -f "$d/.delegate-only" || echo "UNPINNED $d"; done`, plus `wacli capabilities --json | jq -e '.features | index("store_pin")'` against the running binary of each daemon.
+- `wacli devices` and `wacli capabilities` always ask the running daemon and never connect.
 - `--refresh-contacts` imports contacts from the session store.
 - `--refresh-groups` fetches joined groups live and updates local group metadata and participant snapshots.
 - `--refresh-channels` fetches subscribed WhatsApp Channels live and updates local chat rows.
@@ -37,15 +48,19 @@ wacli sync [--once] [--follow] [--idle-exit 30s] [--max-reconnect 5m] [--stale-t
 - After `sync --follow` finishes startup and opens its local delegate socket, these commands for the same store are delegated to it so they do not fail on the store lock:
   - `send text`, `send file`, `send sticker`, `send voice`, `send react`, `send location`, `send poll`, and `send select`.
   - `poll vote`, `presence typing`, `presence paused`, and `messages edit`.
-  - `chats mark-read` and `chats mark-unread`.
-- `send status` and the other chat-state commands (`archive`/`unarchive`, `pin`/`unpin`, `mute`/`unmute`) are not delegated and still require the direct store lock.
+  - `chats mark-read`, `chats mark-unread`, `chats archive`, `chats unarchive`, `chats pin`, `chats unpin`, `chats mute`, and `chats unmute`.
+  - `contacts check`.
+- `send status` is not delegated and still requires the direct store lock.
 - After connecting, sync fetches WhatsApp chat app-state deltas (`regular_high` and `regular_low`) so starred, delete-for-me, mute, archive, pin, and mark-read changes made while `wacli` was offline are caught up instead of relying only on live push notifications.
 - Sync imports messages sent from your other linked devices into the destination chat with `from_me=true`, so local history covers both incoming and outgoing conversation sides.
 - Sync decrypts encrypted message edits and updates the original local row only when the authenticated sender, chat, and target message match. Malformed, redirected, or unsupported edits are rejected without changing local history or emitting a message webhook.
-- If whatsmeow reports an app-state LTHash mismatch, sync attempts one full refresh for that collection before requesting a phone snapshot. Recovery uses a durable intent and ordered local persistence; interrupted work is replayed at the next startup before incremental fetches. Full refresh and phone recovery have independent timeouts, and each collection gets at most one automatic recovery sequence per sync run. Failed recovery retains its intent and emits a warning while normal message/history handling continues.
+- If whatsmeow reports an app-state LTHash mismatch, sync requests a phone recovery snapshot for that collection first and falls back to a full refresh only when the snapshot fails. The snapshot restores the collection at the server head without replaying the patch chain, so it also repairs an account whose chain never verifies; a full refresh on such a chain leaves the local version behind head and every later write to that collection fails with a 409 conflict. Recovery uses a durable intent and ordered local persistence; interrupted work is replayed at the next startup (full refresh first, since the intent means missed local events rather than a hash divergence; phone snapshot first for a collection whose full sync is known not to verify, where a full refresh only deletes the local version) before incremental fetches. Each step has its own 2-minute timeout. A successful repair admits the next mismatch immediately; a failed one defers automatic repair of that collection for 2 minutes, retains its intent, and emits a warning while normal message/history handling continues.
+- Label writes (`labels create|rename|delete|attach|detach`) run the same pre-write sync as the chat-state commands, so a lagging `regular` version is repaired before the send.
+- Empty app-state key shares are rejected before key storage, and their account-scoped unavailable status is retained in `wacli.db` across client restarts. A later usable key share clears that status. A collection that needs a known empty key uses the bounded full-refresh and phone-snapshot recovery path when it is next fetched or decoded, including one-shot chat-state commands. Ordinary missing keys keep waiting for normal delivery. Recovery succeeds only when usable snapshot keys are available; failure preserves recovery state and prevents the requested chat-state write.
 - Sync stores WhatsApp call signaling and call-log metadata in `call_events`; inspect it with `wacli calls list`.
 - Sync stores WhatsApp status broadcasts in `status_messages`, separate from normal chat `messages`.
 - Sync stores location pins and live-location shares in `message_locations`, keyed by (`chat_jid`, `msg_id`); the message row keeps `media_type=location` (or `live_location`). Pins synced before this table existed have no coordinates and cannot be backfilled.
+- Unreadable messages emit an `undecryptable_message` warning with chat, sender, and message ID. Its `recovery=requested_if_possible` field is conditional: the SDK requests a primary-device copy immediately when ciphertext is absent, or after a short delay on an eligible first decryption failure; repeated failures, cancelled requests, and bot-message secret failures can take different paths. `is_unavailable` also covers missing group sender keys, so it does not identify the exact retry path. Typed unavailable content, including `view_once`, can still prompt a protocol request without guaranteeing a readable copy. Restart an existing `sync --follow` process after upgrading to enable the updated client behavior.
 - In an interactive terminal, routine connected/history/progress updates share one updating stderr status line. Warnings and errors still print as separate lines so they remain visible.
 - `--stale-threshold DURATION` in follow mode detects keepalive failures. If whatsmeow reports that the last successful keepalive is older than this duration, sync force-closes the connection and reconnects. Healthy quiet sessions are not reconnected just because no chat events arrive. Disabled by default (`0`); accepted values are `1s` up to but not including `2m20s`, which reserves one maximum keepalive probe interval plus response deadline before whatsmeow's own 3-minute auto-reconnect window.
 - `--presence-mode normal|quiet` controls global linked-device presence during sync. `normal` is the default and preserves the existing behavior: sync sends available presence after connecting or receiving a push-name update, then sends unavailable presence on cleanup. `quiet` suppresses the available-presence sends while keeping the final unavailable cleanup; use it for personal-number mirrors where keeping primary-phone notifications audible matters. WhatsApp ultimately controls notification routing, so this mode avoids the active linked-device signal but cannot guarantee phone behavior on every platform.
@@ -54,6 +69,9 @@ wacli sync [--once] [--follow] [--idle-exit 30s] [--max-reconnect 5m] [--stale-t
 - `--events` emits one NDJSON lifecycle event per stderr line for machine consumers. Routine human progress/status lines, interrupt prompts, and command errors are emitted as events while events are enabled.
 - `offline_sync_preview` reports the server's announced reconnect backlog with `total`, `messages`, `receipts`, `notifications`, and `app_data_changes`; `offline_sync_completed` reports the server's final `count`. Without `--events`, both print as status lines. Completion can arrive without a preview, including when there is no backlog.
 - These are server replay signals on stderr. Webhooks use a separate background queue, so completion does not mean queued HTTP deliveries have finished. Storage failures or webhook drops can also make delivery counts differ from the announced counts. Do not use these signals to classify individual webhook messages as replayed or live. Webhook payloads keep their existing shape.
+- With `--events`, typing and presence are reported too, under the JIDs the store uses for chats (a LID is mapped to the phone number when the mapping is known). Neither keeps an idle `--once` sync alive, and neither is printed without `--events`.
+  - `chat_presence` has `chat_jid`, `sender_jid`, `state` (`composing` or `paused`) and `media` (`audio` while a voice note is being recorded, otherwise empty). WhatsApp sends these only while sync shows as available (`--presence-mode normal`).
+  - `presence` has `jid`, `online` and, when WhatsApp shares it, `last_seen` (RFC 3339, UTC). It arrives only for contacts watched with [`presence subscribe`](presence.md), which the running sync keeps watching across reconnects (it asks again after each one); a `--presence-mode quiet` sync refuses the subscription.
 
 ## Webhook payloads
 
@@ -70,6 +88,8 @@ Messages use the stored live message payload documented above:
 ```json
 {"Chat":"15551234567@s.whatsapp.net","ID":"3EB0…","SenderJID":"15551234567@s.whatsapp.net","Timestamp":"2026-07-25T10:00:00Z","FromMe":false,"Text":"hi","ChatName":"Alice"}
 ```
+
+Media messages include a `Media` object containing only `Type`, `Caption`, `Filename`, `MimeType`, and `FileLength`; messages without media retain `Media: null`. Attachment retrieval fields (`MediaKey`, `DirectPath`, `FileSHA256`, and `FileEncSHA256`) are not exported. Older releases exposed these fields unintentionally: consumers that downloaded from them should use `--download-media` or `media download` instead. Local download and retry data remains available in the store. Review retained webhook logs and queues from older releases for attachment keys.
 
 `EventType: "receipt"` reports delivery and read state for messages you sent. Only
 `delivered`, `read`, and `played` cross the webhook; the protocol bookkeeping types
@@ -108,3 +128,27 @@ wacli sync --follow --stale-threshold 2m --events 2>events.ndjson
 wacli sync --follow --webhook https://example.com/wacli --webhook-secret "$WACLI_WEBHOOK_SECRET"
 wacli sync --follow --webhook https://example.com/wacli --webhook-events message,receipt,chat_presence
 ```
+
+### `--id`: retries, `already_sent` and `resultado_incerto`
+
+A send with `--id <msgid>` (`--new-id` on react, select, edit and poll vote) is safe to retry, within these rules.
+
+**One id per message: one action sent to one recipient.** A fan-out to several chats needs one id per chat. An id derived from a template or a rule must include the run. Two callers on one account (Hermes and Dona on `pedro_cunha`) must not share an id scheme.
+
+What a retry answers:
+
+| Situation | Answer | Process exit |
+|---|---|---|
+| The same message (same kind and text) is stored | `already_sent: true`, `to` = the chat it was stored under, nothing sent | 0 |
+| Same, and the typed recipient differs from the first attempt's | the above plus `target_mismatch` | 0 |
+| The id names a different message (other kind or text) | error `id_reused`, nothing sent | 1 |
+| An earlier attempt went out but the local store write failed | `already_sent: true` (the row says `sent`) | 0 |
+| An earlier attempt started and its result is unknown | `resultado_incerto`: `outcome_unknown: true`, `code`, `id`, nothing sent | 75 |
+
+`resultado_incerto` means the ack wait was cut after the frame went out (or the websocket dropped after it). The local store cannot show that message, because it was never stored. **Check on the phone.** If the message is there, nothing more is needed. If it is not, send again with a **new** `--id`. Do not loop on the old id: it keeps answering the same until the row is released.
+
+A failure before the frame goes out (no connection, validation) and the server's own error reply are definite: they release the id, and the same retry sends at once. The decision is made by phase, not by the text of the error.
+
+`wacli pending-sends list` shows the recorded sends. `wacli pending-sends clear --id <id>` releases one id that is blocked wrongly, for example after a daemon crash mid-send when you have confirmed on the phone that the message never left. Rows older than 7 days stop blocking by themselves. Both commands are local maintenance: they take the store lock, so stop the daemon first on a pinned store.
+
+The sync daemon applies the same rules to every kind that stores a sent message: text, file, voice, sticker, location, poll, react and forward. The commands that send on their own connection (a store with no daemon and no pin) write the same rows.

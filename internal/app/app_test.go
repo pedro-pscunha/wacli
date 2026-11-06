@@ -326,3 +326,21 @@ func assertNoAppSQLiteSidecars(t *testing.T, path string) {
 		}
 	}
 }
+
+func TestConnectRefusedWhenDelegateOnly(t *testing.T) {
+	dir := t.TempDir()
+	a, err := New(Options{StoreDir: dir, DelegateOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	f := newFakeWA()
+	a.wa = f
+	err = a.Connect(context.Background(), false, nil)
+	if !errors.Is(err, ErrDelegateOnly) {
+		t.Fatalf("Connect err = %v, want ErrDelegateOnly", err)
+	}
+	if f.connectCalls != 0 {
+		t.Fatalf("connect attempted %d times", f.connectCalls)
+	}
+}

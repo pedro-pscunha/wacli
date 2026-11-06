@@ -51,6 +51,7 @@ func newPollVoteCmd(flags *rootFlags) *cobra.Command {
 	var senderOverride string
 	postSendWait := postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "vote",
 		Short: "Vote on a poll",
@@ -66,13 +67,18 @@ func newPollVoteCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
 				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
 					Kind:           "poll_vote",
+					NewID:          newMsgID,
 					To:             to,
 					Pick:           pick,
 					ID:             msgID,
@@ -145,6 +151,7 @@ func newPollVoteCmd(flags *rootFlags) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&to, "to", "", "chat JID, phone number, or contact/group/chat name where the poll lives")
+	cmd.Flags().StringVar(&newMsgID, "new-id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().IntVar(&pick, "pick", 0, "when --to is ambiguous, pick the Nth match (1-indexed)")
 	cmd.Flags().StringVar(&msgID, "id", "", "poll message ID (the original PollCreationMessage)")
 	cmd.Flags().StringArrayVar(&voteOptions, "option", nil, "option to vote for (repeat for multi-select)")

@@ -6,6 +6,8 @@ Read when: sending text, files, stickers, locations, polls, status broadcasts, q
 
 When `sync --follow` is already running for the same store, send commands delegate the send to that running process instead of opening a second WhatsApp session. This keeps scripts usable while continuous sync owns the store lock.
 
+Generic connection errors do not automatically start a fresh send: a disconnect can happen after a message frame was submitted but before its acknowledgement arrived. The outcome can therefore be uncertain. Inspect history before deciding whether to send again. Known preparation/lookup failures can still retry once; an ordinary message-acknowledgement timeout also does not trigger a fresh outer send. This policy does not establish recipient delivery or guarantee server-side deduplication.
+
 ## Commands
 
 ```bash
@@ -99,6 +101,7 @@ wacli polls list [--chat RECIPIENT] [--limit N] [--json]
 
 ## Files
 
+- Set `WACLI_MEDIA_ROOTS` to a platform path-list of absolute directories (`:` on Unix, `;` on Windows) to confine which local files `send file`, `send voice`, `send sticker` and `send status --file` may upload. The file must resolve, symlinks included, to a path inside one of them; anything else is refused before the store is opened or a running `sync --follow` is asked to send. Unset or empty keeps the default of no restriction. Relative roots and nonempty lists without directories are errors; missing roots are skipped. Set the variable in both the invoking CLI and the `sync --follow` environment: the CLI checks before delegation, and an upgraded daemon enforces its own roots when it opens the upload. Restart sync after configuring this policy. Symlinked roots work; symlinks that escape all configured roots are refused. This is an upload guardrail, not an OS sandbox for a process that can change its own environment or the allowed files.
 - File uploads are capped at 100 MiB.
 - MIME type is detected automatically unless `--mime` is set.
 - WhatsApp derives the message bubble (image, video, audio, or document) from the message type, which wacli picks from the MIME by default. Use `--as auto|document|audio|image|video` to force it. For example, `--mime audio/mpeg --as document` delivers an mp3 as a downloadable document instead of an inline audio bubble, matching how the mobile app attaches files. `--as auto` (the default) keeps MIME-based detection. `--ptt` only accepts `--as auto` or `--as audio`.
@@ -138,3 +141,5 @@ wacli poll vote --to "Family" --id ABC123 --option "Pizza"
 wacli poll show --to "Family" --id ABC123 --json
 wacli polls list --chat "Family" --limit 10
 ```
+
+Accepted text and attachment sends retain their native quote ID and canonical quote sender in immediate local history. Attachments use the same verified phone/LID chat identity as text; the wire recipient is unchanged. A local history-save failure warns without sending the accepted message again.

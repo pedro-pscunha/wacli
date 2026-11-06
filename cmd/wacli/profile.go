@@ -13,8 +13,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/openclaw/wacli/internal/app"
-	"github.com/openclaw/wacli/internal/lock"
 	"github.com/openclaw/wacli/internal/out"
 	"github.com/openclaw/wacli/internal/wa"
 	"github.com/spf13/cobra"
@@ -58,24 +56,11 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
 
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[profilePictureSetResult](ctx, flags, sendDelegateRequest{Kind: profileSetPictureKind, Picture: imgBytes})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			pictureID, err := a.WA().SetProfilePicture(ctx, imgBytes)
-			if err != nil {
-				return fmt.Errorf("set profile picture: %w", err)
-			}
+			pictureID := res.PictureID
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"picture_id": pictureID})
@@ -96,16 +81,13 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
 			if err := flags.requireWritable(); err != nil {
 				return err
 			}
-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
+			ctx, cancel := withTimeout(context.Background(), flags)
+			defer cancel()
+			res, err := callKind[profilePictureSetResult](ctx, flags, sendDelegateRequest{Kind: profileRemovePictureKind})
 			if err != nil {
 				return err
 			}
-			defer cancel()
-			defer closeApp(a, lk)
-			pictureID, err := a.WA().SetProfilePicture(ctx, nil)
-			if err != nil {
-				return fmt.Errorf("remove profile picture: %w", err)
-			}
+			pictureID := res.PictureID
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"removed": true, "picture_id": pictureID})
 			}
@@ -129,14 +111,13 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
 			if about == "" {
 				return fmt.Errorf("about text is required")
 			}
-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
-			if err != nil {
+			if err := validateDelegateRequest(sendDelegateRequest{Kind: profileSetAboutKind, About: about}); err != nil {
 				return err
 			}
+			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			defer closeApp(a, lk)
-			if err := a.WA().SetStatusMessage(ctx, about); err != nil {
-				return fmt.Errorf("set profile about: %w", err)
+			if _, err := callKind[profileAboutSetResult](ctx, flags, sendDelegateRequest{Kind: profileSetAboutKind, About: about}); err != nil {
+				return err
 			}
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"about": about})
@@ -161,14 +142,10 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
 			if name == "" {
 				return fmt.Errorf("profile name is required")
 			}
-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
-			if err != nil {
-				return err
-			}
+			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			defer closeApp(a, lk)
-			if err := a.WA().SetProfileName(ctx, name); err != nil {
-				return fmt.Errorf("set profile name: %w", err)
+			if _, err := callKind[profileNameResult](ctx, flags, sendDelegateRequest{Kind: profileSetNameKind, Name: name}); err != nil {
+				return err
 			}
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"name": name})
@@ -195,21 +172,16 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
+			ctx, cancel := withTimeout(context.Background(), flags)
+			defer cancel()
+			output, err := callKind[profilePictureInfoOutput](ctx, flags, sendDelegateRequest{Kind: profilePictureInfoKind, To: targetRaw, Preview: preview, ExistingID: existingID})
 			if err != nil {
 				return err
 			}
-			defer cancel()
-			defer closeApp(a, lk)
-			info, err := a.WA().GetProfilePictureInfo(ctx, target, preview, existingID)
-			if err != nil {
-				return fmt.Errorf("get profile picture info: %w", err)
-			}
-			output := formatProfilePictureInfo(target, info)
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, output)
 			}
-			if info == nil {
+			if output.Unchanged {
 				fmt.Fprintf(os.Stdout, "%s profile picture is unchanged.\n", sanitize(target.String()))
 				return nil
 			}
@@ -233,19 +205,11 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
 			if err := flags.requireWritable(); err != nil {
 				return err
 			}
-			target, err := parseProfileTarget(targetRaw)
-			if err != nil {
-				return err
-			}
-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
-			if err != nil {
-				return err
-			}
+			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			defer closeApp(a, lk)
-			output, err := fetchProfileAbout(ctx, a.WA(), target)
+			output, err := callKind[profileAboutOutput](ctx, flags, sendDelegateRequest{Kind: profileGetAboutKind, To: targetRaw})
 			if err != nil {
-				return fmt.Errorf("get profile about: %w", err)
+				return err
 			}
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, output)
@@ -268,21 +232,12 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
 			if err := flags.requireWritable(); err != nil {
 				return err
 			}
-			target, err := parseProfileTarget(targetRaw)
-			if err != nil {
-				return err
-			}
-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
-			if err != nil {
-				return err
-			}
+			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			defer closeApp(a, lk)
-			profile, err := a.WA().GetBusinessProfile(ctx, target)
+			output, err := callKind[businessProfileOutput](ctx, flags, sendDelegateRequest{Kind: profileBusinessKind, To: targetRaw})
 			if err != nil {
-				return fmt.Errorf("get business profile: %w", err)
+				return err
 			}
-			output := formatBusinessProfile(profile)
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, output)
 			}
@@ -292,26 +247,6 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&targetRaw, "jid", "", "target JID or phone number")
 	return cmd
-}
-
-func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, context.CancelFunc, *app.App, *lock.Lock, error) {
-	ctx, cancel := withTimeout(context.Background(), flags)
-	a, lk, err := newApp(ctx, flags, needLock, false)
-	if err != nil {
-		cancel()
-		return nil, nil, nil, nil, err
-	}
-	if err := a.EnsureAuthed(ctx); err != nil {
-		cancel()
-		closeApp(a, lk)
-		return nil, nil, nil, nil, err
-	}
-	if err := a.Connect(ctx, false, nil); err != nil {
-		cancel()
-		closeApp(a, lk)
-		return nil, nil, nil, nil, err
-	}
-	return ctx, cancel, a, lk, nil
 }
 
 func parseProfileTarget(raw string) (types.JID, error) {

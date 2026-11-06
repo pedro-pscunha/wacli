@@ -40,6 +40,47 @@ var schemaMigrations = []migration{
 	{version: 24, name: "app state recovery intents", up: migrateAppStateRecoveryIntents},
 	{version: 25, name: "message locations", up: migrateMessageLocations},
 	{version: 26, name: "message identity indexes and selective fts updates", up: migrateMessageIdentityIndexes},
+	{version: 27, name: "repair placeholder chat activity", up: migratePlaceholderChatActivity},
+	{version: 28, name: "unavailable app state keys", up: migrateUnavailableAppStateKeys},
+	{version: 29, name: "message receipts", up: ensureMessageReceiptsTable},
+	{version: 30, name: "retrieval identity, revision and sync state", up: migrateRetrieval},
+	{version: 31, name: "content-free message change journal", up: migrateChanges},
+	{version: 32, name: "message receipt retrieval revisions", up: migrateReceiptRetrieval},
+	// Fork-only migrations live in a reserved range far above upstream's, so a
+	// rebase onto an upstream that adds its own 33, 34, ... cannot collide with
+	// them: the runner skips any applied version number regardless of its name.
+	{version: forkMigrationBase + 1, name: "fork: own message id lookup index", up: migrateOwnMessageIDIndex},
+	{version: forkMigrationBase + 2, name: "fork: pending sends", up: migratePendingSends},
+}
+
+func migratePlaceholderChatActivity(d *DB) error {
+	for _, table := range []string{"chats", "messages"} {
+		exists, err := d.tableExists(table)
+		if err != nil || !exists {
+			return err
+		}
+	}
+	// Rebuild the derived activity index from local content when its newest row
+	// matches. Preserve snapshot activity strictly newer than local history.
+	_, err := d.sql.Exec(`
+		WITH activity AS (
+			SELECT chat_jid, MAX(ts) AS latest,
+				MAX(CASE WHEN COALESCE(display_text, '') != '(message)'
+					OR TRIM(COALESCE(text, '')) != ''
+					OR COALESCE(media_type, '') != ''
+					OR revoked != 0 OR deleted_for_me != 0
+					THEN ts END) AS content_ts
+			FROM messages GROUP BY chat_jid
+		)
+		UPDATE chats SET last_message_ts = activity.content_ts
+		FROM activity WHERE chats.jid = activity.chat_jid
+			AND chats.last_message_ts = activity.latest
+			AND chats.last_message_ts > COALESCE(activity.content_ts, 0)
+	`)
+	if err != nil {
+		return fmt.Errorf("repair placeholder chat activity: %w", err)
+	}
+	return nil
 }
 
 func migrateMessageIdentityIndexes(d *DB) error {
@@ -86,6 +127,80 @@ func ensureMessageLocalMediaAliasesTable(d *DB) error {
 		)
 	`); err != nil {
 		return fmt.Errorf("ensure message local media aliases: %w", err)
+	}
+	return nil
+}
+
+const messageReceiptsSchema = `
+ CREATE TABLE IF NOT EXISTS message_receipts (
+  chat_jid TEXT NOT NULL,
+  msg_id TEXT NOT NULL,
+  recipient_jid TEXT NOT NULL,
+  status TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY (chat_jid, msg_id, recipient_jid),
+  FOREIGN KEY (chat_jid) REFERENCES chats(jid) ON DELETE CASCADE
+ );
+ CREATE INDEX IF NOT EXISTS idx_message_receipts_msg ON message_receipts(chat_jid, msg_id);
+`
+
+// ensureMessageReceiptsTable adds the receipt table to stores created before it
+// existed. The core schema only runs once, so a new table needs its own step.
+func ensureMessageReceiptsTable(d *DB) error {
+	if _, err := d.sql.Exec(messageReceiptsSchema); err != nil {
+		return fmt.Errorf("ensure message receipts: %w", err)
+	}
+	return nil
+}
+
+// Prerelease retrieval builds occupied 29 and 30 before upstream assigned 29
+// to receipts. Move only those exact markers; do not rerun or reseed their
+// migrations, which already own durable identities, revisions and checkpoints.
+func reconcilePreReleaseRetrievalMigrations(d *DB) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin retrieval migration reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	var legacy int
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations
+ WHERE (version=29 AND name='retrieval identity, revision and sync state')
+ OR (version=30 AND name='content-free message change journal')`).Scan(&legacy); err != nil {
+		return fmt.Errorf("inspect prerelease retrieval migrations: %w", err)
+	}
+	if legacy == 0 {
+		return tx.Commit()
+	}
+	// An interrupted earlier open can already have recorded the new journal
+	// marker. Accept matching markers, but never overwrite an unknown migration.
+	var conflicts int
+	if err = tx.QueryRow(`SELECT count(*) FROM schema_migrations WHERE
+ (version=29 AND name NOT IN ('message receipts','retrieval identity, revision and sync state')) OR
+ (version=30 AND name NOT IN ('retrieval identity, revision and sync state','content-free message change journal')) OR
+ (version=31 AND name!='content-free message change journal')`).Scan(&conflicts); err != nil {
+		return fmt.Errorf("inspect retrieval migration conflicts: %w", err)
+	}
+	if conflicts != 0 {
+		return fmt.Errorf("cannot reconcile unknown retrieval migration ownership")
+	}
+	if _, err = tx.Exec(messageReceiptsSchema); err != nil {
+		return fmt.Errorf("reconcile prerelease message receipts: %w", err)
+	}
+	if _, err = tx.Exec(`
+ INSERT OR IGNORE INTO schema_migrations(version,name,applied_at)
+ SELECT 31,name,applied_at FROM schema_migrations
+ WHERE version=30 AND name='content-free message change journal';
+ DELETE FROM schema_migrations WHERE version=30 AND name='content-free message change journal';
+ INSERT OR IGNORE INTO schema_migrations(version,name,applied_at)
+ SELECT 30,name,applied_at FROM schema_migrations
+ WHERE version=29 AND name='retrieval identity, revision and sync state';
+ DELETE FROM schema_migrations WHERE version=29 AND name='retrieval identity, revision and sync state';
+ INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) VALUES(29,'message receipts',?);
+ `, nowUTC().Unix()); err != nil {
+		return fmt.Errorf("reconcile prerelease retrieval markers: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit retrieval migration reconciliation: %w", err)
 	}
 	return nil
 }
@@ -160,6 +275,22 @@ func reconcilePreReleaseAppStateMigrations(d *DB) error {
 		if err := ensureMessageLocalMediaAliasesTable(d); err != nil {
 			return fmt.Errorf("reconcile pre-release message local media aliases migration: %w", err)
 		}
+	}
+	return nil
+}
+
+// ensureAppStateFullSyncBroken creates the per-collection "latest full sync
+// did not verify" flag table. It lives in ensureCurrentSchema like the other
+// idempotent guards instead of a numbered migration: older binaries simply
+// ignore the extra table, so stores stay forward- and backward-compatible.
+func ensureAppStateFullSyncBroken(d *DB) error {
+	if _, err := d.sql.Exec(`
+		CREATE TABLE IF NOT EXISTS app_state_full_sync_broken (
+			collection TEXT PRIMARY KEY,
+			marked_at INTEGER NOT NULL
+		)
+	`); err != nil {
+		return fmt.Errorf("create app state full sync verification table: %w", err)
 	}
 	return nil
 }
@@ -282,6 +413,82 @@ func migrateMessagesMediaUnavailableColumn(d *DB) error {
 	return nil
 }
 
+// forkMigrationBase is the first version number of this fork's own migrations.
+const forkMigrationBase = 1000
+
+// migrateOwnMessageIDIndex lets FindOwnMessage find a sent message by its id
+// without scanning the table: the primary key is (chat_jid, msg_id), so msg_id
+// alone has no usable index. The index is partial, so it holds only the
+// messages this account sent. An older binary ignores the extra migration row.
+func migrateOwnMessageIDIndex(d *DB) error {
+	hasMessages, err := d.tableExists("messages")
+	if err != nil || !hasMessages {
+		return err
+	}
+	if _, err := d.sql.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_msgid_fromme ON messages(msg_id) WHERE from_me = 1`); err != nil {
+		return fmt.Errorf("create own message id index: %w", err)
+	}
+	return nil
+}
+
+// migratePendingSends creates the table that records a send with a caller-chosen
+// id before it goes on the wire. It is separate from messages so an unfinished
+// send never shows up in a chat. An older binary ignores the table.
+//
+// kind and content_hash let a retry tell "the same message again" from "an id
+// reused for another message"; typed_to is the recipient as the caller typed it,
+// which is not always the JID the send stored under.
+func migratePendingSends(d *DB) error {
+	if _, err := d.sql.Exec(`
+		CREATE TABLE IF NOT EXISTS pending_sends (
+			msg_id TEXT PRIMARY KEY,
+			chat_jid TEXT NOT NULL,
+			typed_to TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL DEFAULT '',
+			content_hash TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`); err != nil {
+		return fmt.Errorf("create pending_sends table: %w", err)
+	}
+	return nil
+}
+
+// reconcileForkMigrations renames this fork's pre-release migration rows (33 and
+// 34) to the reserved range, so a store that applied them is not migrated twice
+// and upstream's own 33 and 34 stay free. The names are checked: a row with the
+// same number but another name belongs to upstream and is left alone.
+func reconcileForkMigrations(d *DB) error {
+	for _, m := range []struct {
+		old, new int
+		oldName  string
+		newName  string
+	}{
+		{33, forkMigrationBase + 1, "own message id lookup index", "fork: own message id lookup index"},
+		{34, forkMigrationBase + 2, "pending sends", "fork: pending sends"},
+	} {
+		var name string
+		err := d.sql.QueryRow(`SELECT name FROM schema_migrations WHERE version = ?`, m.old).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("check migration %d: %w", m.old, err)
+		}
+		if name != m.oldName {
+			continue
+		}
+		if _, err := d.sql.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+			SELECT ?, ?, applied_at FROM schema_migrations WHERE version = ?`, m.new, m.newName, m.old); err != nil {
+			return fmt.Errorf("renumber migration %d: %w", m.old, err)
+		}
+		if _, err := d.sql.Exec(`DELETE FROM schema_migrations WHERE version = ? AND name = ?`, m.old, m.oldName); err != nil {
+			return fmt.Errorf("drop old migration row %d: %w", m.old, err)
+		}
+	}
+	return nil
+}
+
 func (d *DB) ensureSchema() error {
 	if _, err := d.sql.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -291,6 +498,13 @@ func (d *DB) ensureSchema() error {
 		)
 	`); err != nil {
 		return fmt.Errorf("create schema_migrations table: %w", err)
+	}
+
+	if err := reconcilePreReleaseRetrievalMigrations(d); err != nil {
+		return err
+	}
+	if err := reconcileForkMigrations(d); err != nil {
+		return err
 	}
 
 	applied := map[int]bool{}
@@ -338,6 +552,12 @@ func (d *DB) ensureCurrentSchema() error {
 	if err := migratePolls(d); err != nil {
 		return fmt.Errorf("ensure current polls schema: %w", err)
 	}
+	if err := migrateOwnMessageIDIndex(d); err != nil {
+		return fmt.Errorf("ensure current own message id index: %w", err)
+	}
+	if err := ensurePendingSendsColumns(d); err != nil {
+		return fmt.Errorf("ensure current pending sends schema: %w", err)
+	}
 	if err := migrateCallEvents(d); err != nil {
 		return fmt.Errorf("ensure current call events schema: %w", err)
 	}
@@ -368,8 +588,14 @@ func (d *DB) ensureCurrentSchema() error {
 	if err := ensureAppStateRecoveryIntents(d); err != nil {
 		return fmt.Errorf("ensure current app state recovery intents: %w", err)
 	}
+	if err := ensureAppStateFullSyncBroken(d); err != nil {
+		return fmt.Errorf("ensure current app state full sync verification flags: %w", err)
+	}
 	if err := migrateMessageLocations(d); err != nil {
 		return fmt.Errorf("ensure current message locations schema: %w", err)
+	}
+	if err := migrateUnavailableAppStateKeys(d); err != nil {
+		return fmt.Errorf("ensure unavailable app state keys: %w", err)
 	}
 	return nil
 }
@@ -764,6 +990,15 @@ func migrateContactsSystemNameColumn(d *DB) error {
 }
 
 func migrateMessagesFTS(d *DB) error {
+	// Rebuilding/changing the index invalidates any outstanding ranked cursor.
+	if exists, err := d.tableExists("retrieval_state"); err != nil {
+		return err
+	} else if exists {
+		if _, err := d.sql.Exec(`UPDATE retrieval_state SET revision=revision+1 WHERE id=1`); err != nil {
+			return err
+		}
+	}
+
 	ftsExists, err := d.tableExists("messages_fts")
 	if err != nil {
 		return err
@@ -916,6 +1151,8 @@ func tableInfoPragma(table string) (string, error) {
 		return `PRAGMA table_info("messages_fts")`, nil
 	case "status_messages":
 		return `PRAGMA table_info("status_messages")`, nil
+	case "pending_sends":
+		return `PRAGMA table_info("pending_sends")`, nil
 	default:
 		return "", fmt.Errorf("unsupported table %q", table)
 	}
@@ -936,4 +1173,38 @@ func isSQLiteIdentifier(name string) bool {
 		return false
 	}
 	return true
+}
+
+func migrateUnavailableAppStateKeys(d *DB) error {
+	_, err := d.sql.Exec(`CREATE TABLE IF NOT EXISTS unavailable_app_state_keys (
+  account_jid TEXT NOT NULL,
+  key_id BLOB NOT NULL,
+  PRIMARY KEY(account_jid,key_id)
+ )`)
+	return err
+}
+
+// ensurePendingSendsColumns adds the columns a store gets from the first version
+// of the table (msg_id, chat_jid, state, created_at), and creates the table when
+// it is missing.
+func ensurePendingSendsColumns(d *DB) error {
+	if err := migratePendingSends(d); err != nil {
+		return err
+	}
+	for _, col := range []struct{ name, ddl string }{
+		{"typed_to", `ALTER TABLE pending_sends ADD COLUMN typed_to TEXT NOT NULL DEFAULT ''`},
+		{"kind", `ALTER TABLE pending_sends ADD COLUMN kind TEXT NOT NULL DEFAULT ''`},
+		{"content_hash", `ALTER TABLE pending_sends ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`},
+	} {
+		has, err := d.tableHasColumn("pending_sends", col.name)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := d.sql.Exec(col.ddl); err != nil {
+				return fmt.Errorf("add pending_sends.%s: %w", col.name, err)
+			}
+		}
+	}
+	return nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/openclaw/wacli/internal/wa"
 	"os"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ func newSendStatusCmd(flags *rootFlags) *cobra.Command {
 	var mimeOverride string
 	var postSendWait = postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Send a status broadcast",
@@ -44,6 +46,11 @@ func newSendStatusCmd(flags *rootFlags) *cobra.Command {
 			}
 			if err := flags.requireWritable(); err != nil {
 				return err
+			}
+			if filePath != "" {
+				if err := checkOutboundMediaPath(filePath); err != nil {
+					return err
+				}
 			}
 			if cmd.Flags().Changed("font") {
 				fontSet = true
@@ -60,8 +67,12 @@ func newSendStatusCmd(flags *rootFlags) *cobra.Command {
 					return err
 				}
 			}
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
@@ -139,6 +150,7 @@ func newSendStatusCmd(flags *rootFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&message, "message", "", "status text or media caption")
+	cmd.Flags().StringVar(&newMsgID, "id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().StringVar(&filePath, "file", "", "media file to send as a status update")
 	cmd.Flags().StringVar(&mimeOverride, "mime", "", "override detected MIME type for --file")
 	cmd.Flags().StringVar(&backgroundColor, "background-color", "", "text status background color (#RRGGBB or #AARRGGBB)")

@@ -25,6 +25,10 @@ type BackfillOptions struct {
 	IdleExit       time.Duration
 }
 
+// lateOnDemandGrace bounds how long a finished backfill keeps listening for a
+// reply that arrives after its wait ended.
+const lateOnDemandGrace = 60 * time.Second
+
 const (
 	DefaultBackfillCount    = 50
 	DefaultBackfillRequests = 1
@@ -46,33 +50,40 @@ type onDemandResponse struct {
 	endType       waHistorySync.Conversation_EndOfHistoryTransferType
 }
 
-func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (BackfillResult, error) {
+func (a *App) prepareBackfill(ctx context.Context, opts BackfillOptions) (types.JID, BackfillOptions, error) {
 	chatStr := strings.TrimSpace(opts.ChatJID)
 	if chatStr == "" {
-		return BackfillResult{}, fmt.Errorf("--chat is required")
+		return types.JID{}, opts, fmt.Errorf("--chat is required")
 	}
 	chat, err := types.ParseJID(chatStr)
 	if err != nil {
-		return BackfillResult{}, fmt.Errorf("parse chat JID: %w", err)
+		return types.JID{}, opts, fmt.Errorf("parse chat JID: %w", err)
 	}
-	chatStr = chat.String()
-
 	opts = normalizeBackfillOptions(opts)
 	if err := validateBackfillOptions(opts); err != nil {
-		return BackfillResult{}, err
+		return types.JID{}, opts, err
 	}
-
 	if err := a.EnsureAuthed(ctx); err != nil {
-		return BackfillResult{}, err
+		return types.JID{}, opts, err
 	}
 	if err := a.OpenWA(); err != nil {
-		return BackfillResult{}, err
+		return types.JID{}, opts, err
 	}
-	a.wa.SetManualHistorySyncDownload(true)
-	defer a.wa.SetManualHistorySyncDownload(false)
+	return chat, opts, nil
+}
 
-	beforeCount, _ := a.db.CountMessages()
+// backfillRunner holds the on-demand request loop. BackfillHistory drives it
+// from a one-shot sync, BackfillHistoryLive from an already connected daemon.
+type backfillRunner struct {
+	handleOnDemand func(*events.HistorySync)
+	run            func(ctx context.Context) error
+	cleanup        func()
+	requestsSent   *int
+	responsesSeen  *int
+	stored         *atomic.Int64
+}
 
+func (a *App) newBackfillRunner(ctx context.Context, opts BackfillOptions, chat types.JID) *backfillRunner {
 	var mu sync.Mutex
 	var waitCh chan onDemandResponse
 	var manualMessagesStored atomic.Int64
@@ -83,7 +94,7 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 			return
 		}
 		for _, conv := range hs.Data.GetConversations() {
-			if strings.TrimSpace(conv.GetID()) != chatStr {
+			if a.canonicalStoreJIDString(ctx, strings.TrimSpace(conv.GetID())) != a.canonicalStoreJID(ctx, chat).String() {
 				continue
 			}
 			mu.Lock()
@@ -106,14 +117,15 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 	}
 	handlerID := a.wa.AddEventHandler(func(evt any) {
 		switch v := evt.(type) {
-		case *events.HistorySync:
-			handleOnDemand(v)
 		case *events.Message:
 			notif := historySyncNotificationFromMessage(v)
 			if notif == nil || notif.GetSyncType() != waE2E.HistorySyncType_ON_DEMAND {
 				return
 			}
-			data, err := a.wa.DownloadHistorySync(ctx, notif)
+			// A late reply still downloads after the request's context ended.
+			dlCtx, dlCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer dlCancel()
+			data, err := a.wa.DownloadHistorySync(dlCtx, notif)
 			if err != nil {
 				a.emitWarning(
 					"on_demand_history_download_failed",
@@ -126,16 +138,66 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 				return
 			}
 			hs := &events.HistorySync{Data: data}
-			a.handleHistorySync(ctx, SyncOptions{}, hs, &manualMessagesStored, &manualLastEvent, func(string, string) {})
+			// Store as the running sync would: its options, storage limits and
+			// media queue. A reply that comes after the request ended is still
+			// stored, so the work is not lost; only the waiting stops.
+			syncOpts, limits, enqueue := SyncOptions{}, (*syncStorageLimits)(nil), func(string, string) {}
+			if live := a.liveSync.Load(); live != nil {
+				syncOpts, limits, enqueue = live.opts, live.limits, live.enqueueMedia
+			}
+			storeCtx := context.WithoutCancel(ctx)
+			if limits != nil {
+				a.handleHistorySync(storeCtx, syncOpts, hs, &manualMessagesStored, &manualLastEvent, enqueue, limits)
+			} else {
+				a.handleHistorySync(storeCtx, syncOpts, hs, &manualMessagesStored, &manualLastEvent, enqueue)
+			}
+			if err := a.wa.DeleteHistorySyncMedia(storeCtx, notif); err != nil {
+				a.emitWarning(
+					"history_delete_failed",
+					fmt.Sprintf("warning: failed to delete history sync media: %v", err),
+					map[string]any{"error": err.Error()},
+				)
+			}
 			handleOnDemand(hs)
 		}
 	})
-	defer a.wa.RemoveEventHandler(handlerID)
+	// A reply can arrive after the last wait gave up. Keep the handler for one
+	// more wait period so that late blob is stored instead of dropped; the sync
+	// handler ignores ON_DEMAND blobs, so nothing else would store it. The tail
+	// is registered per chat, and a new runner for the same chat ends the old
+	// tail first: otherwise the old handler would take the new request's reply
+	// as its own and the blob would be stored, and its media queued, twice.
+	chatKey := a.canonicalStoreJID(ctx, chat).String()
+	a.endBackfillTail(chatKey)
+	var removeOnce sync.Once
+	removeHandler := func() { removeOnce.Do(func() { a.wa.RemoveEventHandler(handlerID) }) }
+	cleanup := func() {
+		tail := opts.WaitPerRequest
+		if tail > lateOnDemandGrace {
+			tail = lateOnDemandGrace
+		}
+		if tail <= 0 {
+			removeHandler()
+			return
+		}
+		entry := &backfillTail{}
+		timer := time.AfterFunc(tail, func() {
+			removeHandler()
+			a.dropBackfillTail(chatKey, entry)
+		})
+		entry.end = func() { timer.Stop(); removeHandler() }
+		a.backfillTailMu.Lock()
+		if a.backfillTails == nil {
+			a.backfillTails = map[string]*backfillTail{}
+		}
+		a.backfillTails[chatKey] = entry
+		a.backfillTailMu.Unlock()
+	}
 
-	var requestsSent int
-	var responsesSeen int
+	requestsSent := new(int)
+	responsesSeen := new(int)
 	errResponseTimeout := errors.New("timed out waiting for on-demand history sync response")
-	request := func(ctx context.Context, anchor store.MessageInfo) (onDemandResponse, error) {
+	request := func(ctx context.Context, anchor store.MessageInfo, requestChat types.JID) (onDemandResponse, error) {
 		if err := ctx.Err(); err != nil {
 			return onDemandResponse{}, err
 		}
@@ -149,15 +211,17 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 			mu.Unlock()
 		}()
 
-		requestsSent++
+		storeChat := a.canonicalStoreJID(ctx, chat).String()
+		*requestsSent++
 		a.emitOrPrint("backfill_requesting", map[string]any{
-			"chat_jid":      chatStr,
-			"count":         opts.Count,
-			"request":       requestsSent,
-			"anchor_msg_id": anchor.MsgID,
-		}, "Requesting %d older messages for %s...\n", opts.Count, chatStr)
+			"chat_jid":         storeChat,
+			"request_chat_jid": requestChat.String(),
+			"count":            opts.Count,
+			"request":          *requestsSent,
+			"anchor_msg_id":    anchor.MsgID,
+		}, "Requesting %d older messages for %s...\n", opts.Count, storeChat)
 		reqInfo := types.MessageInfo{
-			MessageSource: types.MessageSource{Chat: chat, IsFromMe: anchor.FromMe},
+			MessageSource: types.MessageSource{Chat: requestChat, IsFromMe: anchor.FromMe},
 			ID:            types.MessageID(anchor.MsgID),
 			Timestamp:     anchor.Timestamp,
 		}
@@ -170,18 +234,63 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 		case <-ctx.Done():
 			return onDemandResponse{}, ctx.Err()
 		case resp := <-ch:
-			responsesSeen++
+			*responsesSeen++
 			return resp, nil
 		case <-timer.C:
 			return onDemandResponse{}, fmt.Errorf("%w (anchor %s)", errResponseTimeout, anchor.MsgID)
 		}
 	}
 
-	syncRes, err := a.Sync(ctx, SyncOptions{
-		Mode:     SyncModeOnce,
-		AllowQR:  false,
-		IdleExit: opts.IdleExit,
-		AfterConnect: func(ctx context.Context) error {
+	// A mapped 1:1 chat has two identities. The primary device files some
+	// chats under the LID and others under the phone number, and answers only
+	// requests addressed to the one it uses (#444). Ask by LID first, retry the
+	// same anchor by phone number when that goes unanswered, and keep using
+	// the identity of the successful attempt. Late replies have no request ID,
+	// so either identity remains eligible for fallback in later batches. Resolve on every
+	// request: sync can learn a mapping while connecting.
+	var preferPN bool
+	requestIdentities := func(ctx context.Context) []types.JID {
+		lidChat := a.wa.ResolvePNToLID(ctx, chat)
+		pnChat := a.wa.ResolveLIDToPN(ctx, lidChat)
+		if pnChat == lidChat {
+			return []types.JID{lidChat}
+		}
+		if preferPN {
+			return []types.JID{pnChat, lidChat}
+		}
+		return []types.JID{lidChat, pnChat}
+	}
+	requestAnchor := func(ctx context.Context, anchor store.MessageInfo) (onDemandResponse, error) {
+		ids := requestIdentities(ctx)
+		resp, err := request(ctx, anchor, ids[0])
+		if len(ids) < 2 || !errors.Is(err, errResponseTimeout) || ctx.Err() != nil {
+			return resp, err
+		}
+		a.emitWarning("backfill_identity_retry",
+			fmt.Sprintf("warning: no history response for anchor %s from %s; retrying with %s", anchor.MsgID, ids[0], ids[1]),
+			map[string]any{
+				"chat_jid":               a.canonicalStoreJID(ctx, chat).String(),
+				"anchor_msg_id":          anchor.MsgID,
+				"request_chat_jid":       ids[0].String(),
+				"retry_request_chat_jid": ids[1].String(),
+			})
+		resp, err = request(ctx, anchor, ids[1])
+		if err == nil {
+			preferPN = ids[1].Server == types.DefaultUserServer
+		}
+		return resp, err
+	}
+
+	return &backfillRunner{
+		handleOnDemand: handleOnDemand,
+		cleanup:        cleanup,
+		requestsSent:   requestsSent,
+		responsesSeen:  responsesSeen,
+		stored:         &manualMessagesStored,
+		run: func(ctx context.Context) error {
+			// Sync can learn mappings and migrate old LID rows while connecting.
+			// Resolve the local identity only after that migration has completed.
+			chatStr := a.canonicalStoreJID(ctx, chat).String()
 			for i := 0; i < opts.Requests; i++ {
 				oldest, err := a.db.GetOldestMessageInfo(chatStr)
 				if err != nil {
@@ -191,7 +300,7 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 					return err
 				}
 
-				resp, err := request(ctx, oldest)
+				resp, err := requestAnchor(ctx, oldest)
 				if errors.Is(err, errResponseTimeout) && ctx.Err() == nil {
 					next, nextErr := a.db.GetNextMessageInfo(chatStr, oldest.MsgID)
 					if nextErr != nil && !errors.Is(nextErr, sql.ErrNoRows) {
@@ -201,7 +310,7 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 						a.emitWarning("backfill_anchor_retry",
 							fmt.Sprintf("warning: no history response for anchor %s; retrying once with next local anchor %s", oldest.MsgID, next.MsgID),
 							map[string]any{"chat_jid": chatStr, "anchor_msg_id": oldest.MsgID, "retry_anchor_msg_id": next.MsgID})
-						resp, err = request(ctx, next)
+						resp, err = requestAnchor(ctx, next)
 					}
 				}
 				if err != nil {
@@ -212,7 +321,7 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 					"chat_jid":       chatStr,
 					"conversations":  resp.conversations,
 					"messages":       resp.messages,
-					"responses_seen": responsesSeen,
+					"responses_seen": *responsesSeen,
 				}, "On-demand history sync: %d conversations, %d messages.\n", resp.conversations, resp.messages)
 
 				newOldest, err := a.db.GetOldestMessageInfo(chatStr)
@@ -241,6 +350,48 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 			}
 			return nil
 		},
+	}
+}
+
+// endBackfillTail stops the late-reply listener of the previous backfill of chat.
+func (a *App) endBackfillTail(chatKey string) {
+	a.backfillTailMu.Lock()
+	old := a.backfillTails[chatKey]
+	delete(a.backfillTails, chatKey)
+	a.backfillTailMu.Unlock()
+	if old != nil {
+		old.end()
+	}
+}
+
+// dropBackfillTail forgets entry once its timer fired. It leaves a newer
+// runner's entry for the same chat alone.
+func (a *App) dropBackfillTail(chatKey string, entry *backfillTail) {
+	a.backfillTailMu.Lock()
+	defer a.backfillTailMu.Unlock()
+	if a.backfillTails[chatKey] == entry {
+		delete(a.backfillTails, chatKey)
+	}
+}
+
+func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (BackfillResult, error) {
+	chat, opts, err := a.prepareBackfill(ctx, opts)
+	if err != nil {
+		return BackfillResult{}, err
+	}
+	a.wa.SetManualHistorySyncDownload(true)
+	defer a.wa.SetManualHistorySyncDownload(false)
+
+	beforeCount, _ := a.db.CountMessages()
+	r := a.newBackfillRunner(ctx, opts, chat)
+	defer r.cleanup()
+
+	syncRes, err := a.Sync(ctx, SyncOptions{
+		Mode:             SyncModeOnce,
+		AllowQR:          false,
+		IdleExit:         opts.IdleExit,
+		afterHistorySync: r.handleOnDemand,
+		AfterConnect:     r.run,
 	})
 	if err != nil {
 		return BackfillResult{}, err
@@ -249,12 +400,66 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 	afterCount, _ := a.db.CountMessages()
 
 	return BackfillResult{
-		ChatJID:        chatStr,
-		RequestsSent:   requestsSent,
-		ResponsesSeen:  responsesSeen,
+		ChatJID:        a.canonicalStoreJID(ctx, chat).String(),
+		RequestsSent:   *r.requestsSent,
+		ResponsesSeen:  *r.responsesSeen,
 		MessagesAdded:  afterCount - beforeCount,
 		MessagesSynced: syncRes.MessagesStored,
 	}, nil
+}
+
+// BackfillHistoryLive requests older messages on the connection the caller
+// already holds, which is how the sync daemon repairs a gap without a second
+// session. Messages are stored through the normal history-sync path. The
+// caller must be the connected sync process, which already downloads history
+// payloads manually.
+func (a *App) BackfillHistoryLive(ctx context.Context, opts BackfillOptions) (BackfillResult, error) {
+	chat, opts, err := a.prepareBackfill(ctx, opts)
+	if err != nil {
+		return BackfillResult{}, err
+	}
+	if !a.wa.IsConnected() {
+		return BackfillResult{}, errors.New("not connected")
+	}
+	chatStr := a.canonicalStoreJID(ctx, chat).String()
+	before, _ := a.db.CountChatMessages(chatStr)
+	r := a.newBackfillRunner(ctx, opts, chat)
+	defer r.cleanup()
+	if err := r.run(ctx); err != nil {
+		return BackfillResult{}, err
+	}
+	// MessagesSynced counts every message the backfill processed, including ones
+	// the store already had. MessagesAdded counts rows that are new in THIS chat,
+	// so a repair that only re-delivered known messages reports zero. Other
+	// chats' live traffic cannot enter it; the chat's own live traffic during
+	// the run still can, so it is an upper bound on what the repair added.
+	after, _ := a.db.CountChatMessages(chatStr)
+	added := after - before
+	if added < 0 {
+		added = 0
+	}
+	if synced := r.stored.Load(); added > synced {
+		added = synced
+	}
+	return BackfillResult{
+		ChatJID:        chatStr,
+		RequestsSent:   *r.requestsSent,
+		ResponsesSeen:  *r.responsesSeen,
+		MessagesAdded:  added,
+		MessagesSynced: r.stored.Load(),
+	}, nil
+}
+
+// ValidateBackfillRequest checks a backfill request the way BackfillHistory
+// does, without touching the store or the network.
+func ValidateBackfillRequest(opts BackfillOptions) error {
+	if strings.TrimSpace(opts.ChatJID) == "" {
+		return fmt.Errorf("--chat is required")
+	}
+	if _, err := types.ParseJID(strings.TrimSpace(opts.ChatJID)); err != nil {
+		return fmt.Errorf("parse chat JID: %w", err)
+	}
+	return validateBackfillOptions(normalizeBackfillOptions(opts))
 }
 
 func normalizeBackfillOptions(opts BackfillOptions) BackfillOptions {

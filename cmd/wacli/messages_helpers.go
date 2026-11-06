@@ -20,7 +20,11 @@ func messageChatJIDFilter(ctx context.Context, a *app.App, chat string) ([]strin
 	if chat == "" {
 		return nil, nil
 	}
-	jid, err := wa.ParseUserOrJID(chat)
+	resolved, err := localMessageIdentifier(a.DB(), chat, true)
+	if err != nil {
+		return nil, err
+	}
+	jid, err := wa.ParseUserOrJID(resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +74,10 @@ type lidSenderResolver interface {
 }
 
 func resolveMessageSenderNames(ctx context.Context, a *app.App, msgs []store.Message) []store.Message {
+	return resolveMessageSenderNamesInView(ctx, a, a.DB(), msgs)
+}
+
+func resolveMessageSenderNamesInView(ctx context.Context, a *app.App, db *store.DB, msgs []store.Message) []store.Message {
 	if len(msgs) == 0 || !messagesNeedSenderResolution(msgs) {
 		return msgs
 	}
@@ -80,7 +88,7 @@ func resolveMessageSenderNames(ctx context.Context, a *app.App, msgs []store.Mes
 	if err != nil {
 		return msgs
 	}
-	return resolveMessageSenderNamesWith(ctx, a.DB(), resolver, msgs)
+	return resolveMessageSenderNamesWith(ctx, db, resolver, msgs)
 }
 
 func messagesNeedSenderResolution(msgs []store.Message) bool {
@@ -145,6 +153,12 @@ func getMessageByChatFilter(db *store.DB, chatJIDs []string, id string) (store.M
 	for _, chatJID := range chatJIDs {
 		m, err := db.GetMessage(chatJID, id)
 		if err == nil {
+			// GetMessage reads its own columns, so the delivery state has to be
+			// filled in here for `show` to agree with `list`.
+			if counts, cerr := db.MessageReceipts(m.ChatJID, m.MsgID); cerr == nil {
+				m.DeliveredTo = counts.Delivered
+				m.ReadBy = counts.Read
+			}
 			return m, nil
 		}
 		if !isNoRows(err) {

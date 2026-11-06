@@ -31,6 +31,8 @@ type fakeWA struct {
 	connected     bool
 	autoReconnect bool
 	linkedLID     string
+	ownDevices    []wa.OwnDevice
+	ownDevicesErr error
 
 	nextHandlerID uint32
 	handlers      map[uint32]func(any)
@@ -50,6 +52,10 @@ type fakeWA struct {
 	groups   map[types.JID]*types.GroupInfo
 	news     map[types.JID]*types.NewsletterMetadata
 	lids     map[types.JID]types.JID
+
+	groupInfoCalls int
+	groupInfoErr   error
+	onGroupInfo    func() // runs while a group info lookup is in flight
 
 	getAllContactsErr           error
 	getJoinedGroupsErr          error
@@ -77,12 +83,34 @@ type fakeWA struct {
 	muteCalls                   []fakeMuteCall
 	markReadCalls               []fakeMarkReadCall
 	markReadBeforeApply         func()
+	markReadAfterApply          func()
+	readReceiptCalls            []fakeReadReceiptCall
+	onReadReceipt               func(int) (types.ReceiptType, error)
+	readReceiptErr              error
+	readReceiptType             types.ReceiptType
 	manualHistorySyncCalls      []bool
 	appStateRecoveries          []string
 	appStateFetches             []fakeAppStateFetch
+	hasLocalAppState            bool
+	appStateSnapshotFetches     []string
+	appStateSnapshot            []appstate.Mutation
+	appStateSnapshotErr         error
+	labelEditCalls              []fakeLabelEditCall
+	labelChatCalls              []fakeLabelChatCall
+	labelErr                    error
 
 	presenceCalls   []types.Presence
 	sendPresenceErr error
+
+	presenceSubscriptions []types.JID
+	subscribePresenceErr  error
+	// presenceSubscribeAttempts records every call, failed ones included;
+	// slowSubscribePresence, when set, runs first and can stall or fail one.
+	presenceSubscribeAttempts []types.JID
+	slowSubscribePresence     func(context.Context, types.JID) error
+	// onSubscribePresence, when set, returns an event emitted as WhatsApp's
+	// answer before SubscribePresence returns (nil emits nothing).
+	onSubscribePresence func(types.JID) any
 }
 
 type fakeArchiveCall struct {
@@ -97,6 +125,19 @@ type fakePinCall struct {
 	pin    bool
 }
 
+type fakeLabelEditCall struct {
+	labelID string
+	name    string
+	color   int32
+	deleted bool
+}
+
+type fakeLabelChatCall struct {
+	target  types.JID
+	labelID string
+	labeled bool
+}
+
 type fakeMuteCall struct {
 	target   types.JID
 	mute     bool
@@ -108,6 +149,14 @@ type fakeMarkReadCall struct {
 	read       bool
 	lastMsgTS  time.Time
 	lastMsgKey *waCommon.MessageKey
+}
+
+type fakeReadReceiptCall struct {
+	ids        []types.MessageID
+	timestamp  time.Time
+	chat       types.JID
+	sender     types.JID
+	addressing types.AddressingMode
 }
 
 type fakeSendPollCall struct {
@@ -343,7 +392,17 @@ func (f *fakeWA) GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error
 
 func (f *fakeWA) GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error) {
 	f.mu.Lock()
+	f.groupInfoCalls++
+	hook := f.onGroupInfo
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.groupInfoErr != nil {
+		return nil, f.groupInfoErr
+	}
 	return f.groups[jid], nil
 }
 
@@ -596,6 +655,33 @@ func (f *fakeWA) SendPresence(ctx context.Context, presence types.Presence) erro
 	return f.sendPresenceErr
 }
 
+func (f *fakeWA) SubscribePresence(ctx context.Context, jid types.JID) error {
+	f.mu.Lock()
+	f.presenceSubscribeAttempts = append(f.presenceSubscribeAttempts, jid)
+	slow := f.slowSubscribePresence
+	f.mu.Unlock()
+	if slow != nil {
+		if err := slow(ctx, jid); err != nil {
+			return err
+		}
+	}
+	f.mu.Lock()
+	if f.subscribePresenceErr != nil {
+		err := f.subscribePresenceErr
+		f.mu.Unlock()
+		return err
+	}
+	f.presenceSubscriptions = append(f.presenceSubscriptions, jid)
+	hook := f.onSubscribePresence
+	f.mu.Unlock()
+	if hook != nil {
+		if evt := hook(jid); evt != nil {
+			f.emit(evt)
+		}
+	}
+	return nil
+}
+
 func (f *fakeWA) DecryptReaction(ctx context.Context, reaction *events.Message) (*waProto.ReactionMessage, error) {
 	if f.decryptReactionErr != nil {
 		return nil, f.decryptReactionErr
@@ -703,6 +789,26 @@ func (f *fakeWA) SendMediaRetryReceipt(ctx context.Context, info *types.MessageI
 	return nil
 }
 
+func (f *fakeWA) MarkRead(ctx context.Context, ids []types.MessageID, timestamp time.Time, chat, sender types.JID, addressing types.AddressingMode) (types.ReceiptType, error) {
+	f.mu.Lock()
+	if f.readReceiptErr != nil {
+		err := f.readReceiptErr
+		f.mu.Unlock()
+		return "", err
+	}
+	f.readReceiptCalls = append(f.readReceiptCalls, fakeReadReceiptCall{ids: append([]types.MessageID(nil), ids...), timestamp: timestamp, chat: chat, sender: sender, addressing: addressing})
+	index := len(f.readReceiptCalls) - 1
+	hook, kind := f.onReadReceipt, f.readReceiptType
+	f.mu.Unlock()
+	if hook != nil {
+		return hook(index)
+	}
+	if kind != "" {
+		return kind, nil
+	}
+	return wa.ReadReceiptUnknown, nil
+}
+
 func (f *fakeWA) RequestHistorySyncOnDemand(ctx context.Context, lastKnown types.MessageInfo, count int) (types.MessageID, error) {
 	f.mu.Lock()
 	if f.onDemandErr != nil {
@@ -723,6 +829,25 @@ func (f *fakeWA) RequestHistorySyncOnDemand(ctx context.Context, lastKnown types
 		}
 	}
 	return types.MessageID("req"), nil
+}
+
+func (f *fakeWA) HasLocalAppState(ctx context.Context, name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hasLocalAppState, nil
+}
+
+// noteFullSyncResult models stock whatsmeow's destructive full sync:
+// fetchAppState deletes the saved collection version before decoding, so a
+// failed full sync leaves no local app state behind, and a verified one
+// stores a fresh version.
+func (f *fakeWA) noteFullSyncResult(fullSync bool, err error) {
+	if !fullSync {
+		return
+	}
+	f.mu.Lock()
+	f.hasLocalAppState = err == nil
+	f.mu.Unlock()
 }
 
 func (f *fakeWA) RequestAppStateRecovery(ctx context.Context, name string) (types.MessageID, error) {
@@ -779,11 +904,15 @@ func (f *fakeWA) MarkChatAsRead(ctx context.Context, target types.JID, read bool
 	f.mu.Lock()
 	f.markReadCalls = append(f.markReadCalls, fakeMarkReadCall{target: target, read: read, lastMsgTS: lastMsgTS, lastMsgKey: lastMsgKey})
 	hook := f.markReadBeforeApply
+	afterApply := f.markReadAfterApply
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
 	}
 	beforeApply()
+	if afterApply != nil {
+		afterApply()
+	}
 	return nil, nil
 }
 
@@ -812,6 +941,39 @@ func (f *fakeWA) FetchAppState(ctx context.Context, name string, fullSync, onlyI
 	return nil
 }
 
+func (f *fakeWA) EditLabel(ctx context.Context, labelID, name string, color int32, deleted bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.labelEditCalls = append(f.labelEditCalls, fakeLabelEditCall{
+		labelID: labelID,
+		name:    name,
+		color:   color,
+		deleted: deleted,
+	})
+	return f.labelErr
+}
+
+func (f *fakeWA) LabelChat(ctx context.Context, target types.JID, labelID string, labeled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.labelChatCalls = append(f.labelChatCalls, fakeLabelChatCall{
+		target:  target,
+		labelID: labelID,
+		labeled: labeled,
+	})
+	return f.labelErr
+}
+
+func (f *fakeWA) FetchAppStateSnapshotUnverified(ctx context.Context, name string) ([]appstate.Mutation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appStateSnapshotFetches = append(f.appStateSnapshotFetches, name)
+	if f.appStateSnapshotErr != nil {
+		return nil, f.appStateSnapshotErr
+	}
+	return f.appStateSnapshot, nil
+}
+
 func (f *fakeWA) FetchAppStateEvents(ctx context.Context, name string, fullSync, onlyIfNotSynced bool) ([]any, error) {
 	f.mu.Lock()
 	f.appStateFetches = append(f.appStateFetches, fakeAppStateFetch{
@@ -826,6 +988,7 @@ func (f *fakeWA) FetchAppStateEvents(ctx context.Context, name string, fullSync,
 	}
 	eventCB := f.appStateFetchEvent
 	f.mu.Unlock()
+	f.noteFullSyncResult(fullSync, err)
 	if err != nil {
 		if !errors.Is(err, appstate.ErrKeyNotFound) {
 			f.emit(&events.AppStateSyncError{Name: appstate.WAPatchName(name), FullSync: fullSync, Error: err})
@@ -876,6 +1039,10 @@ func (f *fakeWA) LinkedJID() string {
 	return "1234567890@s.whatsapp.net"
 }
 
+func (f *fakeWA) OwnDevices(ctx context.Context) ([]wa.OwnDevice, error) {
+	return f.ownDevices, f.ownDevicesErr
+}
+
 func (f *fakeWA) LinkedLID() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -883,4 +1050,8 @@ func (f *fakeWA) LinkedLID() string {
 		return ""
 	}
 	return f.linkedLID
+}
+
+func (f *fakeWA) DownloadRetriedMediaToFile(ctx context.Context, directPath string, fileHash, mediaKey []byte, fileLength uint64, mediaType, targetPath string) (int64, error) {
+	return f.DownloadMediaToFile(ctx, directPath, nil, fileHash, mediaKey, fileLength, mediaType, "", targetPath)
 }

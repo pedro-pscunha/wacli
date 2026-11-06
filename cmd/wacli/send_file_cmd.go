@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/openclaw/wacli/internal/wa"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,6 +25,7 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 	var ptt bool
 	postSendWait := postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "file",
 		Short: "Send a file (image/video/audio/document)",
@@ -38,9 +40,23 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 			if err := flags.requireWritable(); err != nil {
 				return err
 			}
+			if err := checkOutboundMediaPath(filePath); err != nil {
+				return err
+			}
 
+			// The default budget (5 min, which also bounds a delegated send in the daemon) would cut a large
+			// upload short: unless --timeout was given, it covers the file's send attempt plus a minute.
+			if !cmd.Flags().Changed("timeout") {
+				if need := fileSendAttemptTimeout(filePath) + time.Minute; need > flags.timeout {
+					flags.timeout = need
+				}
+			}
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
@@ -50,6 +66,7 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 				}
 				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
 					Kind:           "file",
+					NewID:          newMsgID,
 					To:             to,
 					Pick:           pick,
 					File:           delegateFile,
@@ -75,6 +92,13 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
+			ctx, finishID, idDone, idErr := localIDGuard(ctx, flags, a, "file", to, caption, newMsgID)
+			if idDone {
+				return idErr
+			}
+			var sendErr error
+			var sendStoreWarning string
+			defer func() { finishID(sendErr, sendStoreWarning) }()
 
 			toJID, err := resolveRecipient(a, to, recipientOptions{pick: pick, asJSON: flags.asJSON})
 			if err != nil {
@@ -88,7 +112,7 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			res, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
+			res, err := runFileSendOperation(ctx, filePath, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
 				return sendFile(ctx, a, toJID, filePath, sendFileOptions{
 					filename:      filename,
 					caption:       caption,
@@ -99,6 +123,10 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 					ptt:           ptt,
 				})
 			})
+			sendErr = err
+			if err == nil && res.storeWarning != nil {
+				sendStoreWarning = res.storeWarning.Error()
+			}
 			if err != nil {
 				return err
 			}
@@ -120,6 +148,7 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&to, "to", "", "recipient JID, phone number, or contact/group/chat name")
+	cmd.Flags().StringVar(&newMsgID, "id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().IntVar(&pick, "pick", 0, "when --to is ambiguous, pick the Nth match (1-indexed)")
 	cmd.Flags().StringVar(&filePath, "file", "", "path to file")
 	cmd.Flags().StringVar(&filename, "filename", "", "display name for the file (defaults to basename of --file)")

@@ -31,7 +31,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const maxSendFileSize = 100 * 1024 * 1024
+// WhatsApp takes documents up to 2 GB. The file and its encrypted copy are held in memory during the upload.
+const maxSendFileSize = 2_000_000_000
 const imageThumbnailMaxDimension = 96
 const imageThumbnailMaxPixels = 40_000_000
 const voiceWaveformSamples = 64
@@ -196,29 +197,37 @@ func sendFile(ctx context.Context, a interface {
 			FileLength:    up.FileLength,
 		})
 	} else {
-		chatName := a.WA().ResolveChatName(ctx, to, "")
-		kind := chatKindFromJID(to)
-		if err := a.DB().UpsertChat(to.String(), kind, chatName, now); err != nil {
+		// Match text-send and receipt history using the authoritative LID
+		// mapping. Keep the actual wire destination and accepted ID unchanged.
+		storedChat := to.ToNonAD()
+		if to.Server == types.HiddenUserServer {
+			storedChat = canonicalOutboundChat(ctx, a.WA(), to)
+		}
+		chatName := a.WA().ResolveChatName(ctx, storedChat, "")
+		kind := chatKindFromJID(storedChat)
+		if err := a.DB().UpsertChat(storedChat.String(), kind, chatName, now); err != nil {
 			storeErr = fmt.Errorf("chat update: %w", err)
 		}
 		if err := a.DB().UpsertMessage(store.UpsertMessageParams{
-			ChatJID:       to.String(),
-			ChatName:      chatName,
-			MsgID:         id,
-			SenderJID:     "",
-			SenderName:    "me",
-			Timestamp:     now,
-			FromMe:        true,
-			Text:          opts.caption,
-			MediaType:     mediaType,
-			MediaCaption:  opts.caption,
-			Filename:      name,
-			MimeType:      mimeType,
-			DirectPath:    up.DirectPath,
-			MediaKey:      up.MediaKey,
-			FileSHA256:    up.FileSHA256,
-			FileEncSHA256: up.FileEncSHA256,
-			FileLength:    up.FileLength,
+			ChatJID:         storedChat.String(),
+			ChatName:        chatName,
+			MsgID:           id,
+			SenderJID:       "",
+			SenderName:      "me",
+			Timestamp:       now,
+			FromMe:          true,
+			Text:            opts.caption,
+			QuotedMsgID:     replyContext.GetStanzaID(),
+			QuotedSenderJID: canonicalOutboundQuoteSender(ctx, a.WA(), replyContext.GetParticipant()),
+			MediaType:       mediaType,
+			MediaCaption:    opts.caption,
+			Filename:        name,
+			MimeType:        mimeType,
+			DirectPath:      up.DirectPath,
+			MediaKey:        up.MediaKey,
+			FileSHA256:      up.FileSHA256,
+			FileEncSHA256:   up.FileEncSHA256,
+			FileLength:      up.FileLength,
 		}); err != nil {
 			storeErr = errors.Join(storeErr, fmt.Errorf("message update: %w", err))
 		}
@@ -418,7 +427,7 @@ func newAudioMessage(up whatsmeow.UploadResponse, mimeType string, ptt bool, met
 }
 
 func readSendFileData(filePath string) ([]byte, error) {
-	return readRegularFileLimited(filePath, maxSendFileSize)
+	return readRegularFileLimitedWithOpener(filePath, maxSendFileSize, openOutboundMedia)
 }
 
 func attachSendFileReplyContext(msg *waProto.Message, info *waProto.ContextInfo) {

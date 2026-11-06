@@ -47,6 +47,33 @@ func TestAccountsAddNoAuthCreatesConfig(t *testing.T) {
 	}
 }
 
+func TestAccountsAddKeepsNoDefaultWhenAccountsExist(t *testing.T) {
+	isolateAccountConfigHome(t)
+	cfg := &config.AccountsConfig{Accounts: map[string]config.AccountEntry{"work": {Store: "accounts/work"}}}
+	if err := config.SaveAccountsConfig(config.DefaultConfigPath(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	captureRootStderr(t, func() {
+		captureRootStdout(t, func() {
+			if err := execute([]string{"accounts", "add", "personal", "--no-auth"}); err != nil {
+				t.Fatalf("execute accounts add: %v", err)
+			}
+		})
+	})
+
+	got, err := config.LoadAccountsConfig(config.DefaultConfigPath())
+	if err != nil {
+		t.Fatalf("LoadAccountsConfig: %v", err)
+	}
+	if got.DefaultAccount != "" {
+		t.Fatalf("DefaultAccount = %q, want none: a removed default stays removed", got.DefaultAccount)
+	}
+	if _, ok := got.Accounts["personal"]; !ok {
+		t.Fatal("personal account missing")
+	}
+}
+
 func TestAccountsAddValidatesAuthFlagsBeforeSaving(t *testing.T) {
 	isolateAccountConfigHome(t)
 
@@ -60,6 +87,41 @@ func TestAccountsAddValidatesAuthFlagsBeforeSaving(t *testing.T) {
 	storeDir := filepath.Join(filepath.Dir(config.DefaultConfigPath()), "accounts", "personal")
 	if _, statErr := os.Stat(storeDir); !os.IsNotExist(statErr) {
 		t.Fatalf("store stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestAccountsAddValidatesHistoryLimitsBeforeSaving(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "negative",
+			args: []string{"accounts", "add", "personal", "--history-days", "-1"},
+			want: "--history-days cannot be negative",
+		},
+		{
+			name: "above the pairing field",
+			args: []string{"accounts", "add", "personal", "--history-max-per-chat", "4294967296"},
+			want: "--history-max-per-chat cannot be above 4294967295",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateAccountConfigHome(t)
+
+			err := execute(tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("execute error = %v, want %q", err, tc.want)
+			}
+			if _, statErr := os.Stat(config.DefaultConfigPath()); !os.IsNotExist(statErr) {
+				t.Fatalf("config stat error = %v, want not exist", statErr)
+			}
+			storeDir := filepath.Join(filepath.Dir(config.DefaultConfigPath()), "accounts", "personal")
+			if _, statErr := os.Stat(storeDir); !os.IsNotExist(statErr) {
+				t.Fatalf("store stat error = %v, want not exist", statErr)
+			}
+		})
 	}
 }
 

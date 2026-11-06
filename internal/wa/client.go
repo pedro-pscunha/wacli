@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -12,16 +13,21 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 type Options struct {
 	StorePath string
+	// The application owns durable, account-scoped key recovery metadata.
+	KeyStateStore AppStateKeyStateStore
 }
 
 type Client struct {
@@ -115,6 +121,53 @@ func (c *Client) SetAutoReconnect(enabled bool) (bool, bool) {
 	}
 	c.client.EnableAutoReconnect = enabled
 	return previous, true
+}
+
+// HistorySyncLimits shapes the history bundle the primary device pushes when
+// a companion links. By default whatsmeow does not ask for a full sync, so the
+// primary sends only its recent window (about three months); Days narrows that
+// window and Full asks for the full archive instead.
+//
+// The fields are uint32 because that is what the pairing protobuf carries:
+// callers convert once, after checking the value fits, so a request too large
+// for the wire cannot quietly wrap into a different one here.
+type HistorySyncLimits struct {
+	// Days of history to ask for, 0 to leave it to the primary.
+	Days uint32
+	// MaxPerChat caps how many messages each chat brings, 0 for no cap.
+	MaxPerChat uint32
+	// Full asks for a full history sync instead of the recent window. With
+	// Days set it bounds only the full sync: the recent window the primary
+	// sends first keeps its default.
+	Full bool
+	// SizeMB is how many megabytes the primary may put into the full sync,
+	// 0 to leave it to the primary.
+	SizeMB uint32
+}
+
+// SetHistorySyncLimits applies the limits to the device properties whatsmeow
+// sends while pairing. They travel in the pairing handshake, so they only
+// affect a device that links after this call: changing them for an already
+// linked device does nothing.
+func SetHistorySyncLimits(limits HistorySyncLimits) {
+	cfg := wastore.DeviceProps.GetHistorySyncConfig()
+	if cfg == nil {
+		cfg = &waCompanionReg.DeviceProps_HistorySyncConfig{}
+		wastore.DeviceProps.HistorySyncConfig = cfg
+	}
+	wastore.DeviceProps.RequireFullSync = proto.Bool(limits.Full)
+	if limits.Days > 0 {
+		cfg.FullSyncDaysLimit = proto.Uint32(limits.Days)
+		if !limits.Full {
+			cfg.RecentSyncDaysLimit = proto.Uint32(limits.Days)
+		}
+	}
+	if limits.MaxPerChat > 0 {
+		cfg.InitialSyncMaxMessagesPerChat = proto.Uint32(limits.MaxPerChat)
+	}
+	if limits.SizeMB > 0 {
+		cfg.FullSyncSizeMbLimit = proto.Uint32(limits.SizeMB)
+	}
 }
 
 type ConnectOptions struct {
@@ -417,6 +470,78 @@ func (c *Client) FetchAppState(ctx context.Context, name string, fullSync, onlyI
 	return cli.FetchAppState(ctx, appstate.WAPatchName(name), fullSync, onlyIfNotSynced)
 }
 
+// FetchAppStateSnapshotUnverified downloads one collection's full snapshot and
+// decodes it without MAC validation, returning the raw mutations.
+//
+// A collection whose server-side patch history carries an LTHash mismatch
+// cannot be read any other way: both the normal sync and the recovery snapshot
+// fail during verification, before a single mutation is returned. Skipping
+// validation trades the integrity check for readability, so callers must treat
+// the result as untrusted input and must not write it back as canonical state.
+//
+// The call writes NOTHING to the session store: it decodes through a device
+// whose app state writes are dropped (see readOnlyAppStateStore below), so it
+// advances no version and inserts no mutation MACs. That matters because the
+// alternative — a real full sync of a mismatching collection — leaves the local
+// version unable to match the server head, and the next write to that
+// collection then fails with a 409 conflict.
+func (c *Client) FetchAppStateSnapshotUnverified(ctx context.Context, name string) ([]appstate.Mutation, error) {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil || !cli.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+	patchName := appstate.WAPatchName(strings.TrimSpace(name))
+	if patchName == "" {
+		return nil, fmt.Errorf("app state collection name is required")
+	}
+	list, err := cli.DangerousInternals().FetchAppStatePatches(ctx, patchName, 0, true)
+	if err != nil {
+		return nil, fmt.Errorf("fetch app state %s snapshot: %w", patchName, err)
+	}
+	// Decoding writes mutation MACs and a version by default. Read through a
+	// device whose app state writes are dropped, so this read cannot touch the
+	// session store, and so re-reading a snapshot cannot trip the MAC table's
+	// unique constraint.
+	readOnlyDevice := *cli.Store
+	readOnlyDevice.AppState = readOnlyAppStateStore{inner: cli.Store.AppState}
+	proc := appstate.NewProcessor(&readOnlyDevice, newWhatsmeowLogger("AppStateRead", "ERROR", os.Stderr))
+	mutations, _, err := proc.DecodePatches(ctx, list, appstate.HashState{}, false)
+	if err != nil {
+		return nil, fmt.Errorf("decode app state %s snapshot: %w", patchName, err)
+	}
+	return mutations, nil
+}
+
+// readOnlyAppStateStore passes reads through and drops every write, so an app
+// state decode can run without mutating the session store.
+type readOnlyAppStateStore struct {
+	inner wastore.AppStateStore
+}
+
+func (r readOnlyAppStateStore) PutAppStateVersion(context.Context, string, uint64, [128]byte) error {
+	return nil
+}
+
+func (r readOnlyAppStateStore) GetAppStateVersion(ctx context.Context, name string) (uint64, [128]byte, error) {
+	return r.inner.GetAppStateVersion(ctx, name)
+}
+
+func (r readOnlyAppStateStore) DeleteAppStateVersion(context.Context, string) error { return nil }
+
+func (r readOnlyAppStateStore) PutAppStateMutationMACs(context.Context, string, uint64, []wastore.AppStateMutationMAC) error {
+	return nil
+}
+
+func (r readOnlyAppStateStore) DeleteAppStateMutationMACs(context.Context, string, [][]byte) error {
+	return nil
+}
+
+func (r readOnlyAppStateStore) GetAppStateMutationMAC(ctx context.Context, name string, indexMAC []byte) ([]byte, error) {
+	return r.inner.GetAppStateMutationMAC(ctx, name, indexMAC)
+}
+
 // FetchAppStateEvents fetches one collection without globally dispatching the
 // resulting events, so callers can persist that exact collection atomically
 // with their own recovery marker protocol.
@@ -479,6 +604,18 @@ func (c *Client) SendPresence(ctx context.Context, presence types.Presence) erro
 	return cli.SendPresence(ctx, presence)
 }
 
+// SubscribePresence asks WhatsApp to send a user's presence (online, last
+// seen) to this connection. The subscription ends with the connection.
+func (c *Client) SubscribePresence(ctx context.Context, jid types.JID) error {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil || !cli.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+	return cli.SubscribePresence(ctx, jid)
+}
+
 func (c *Client) Logout(ctx context.Context) error {
 	c.mu.Lock()
 	cli := c.client
@@ -511,4 +648,59 @@ func (c *Client) ReconnectWithBackoff(ctx context.Context, minDelay, maxDelay ti
 			delay = maxDelay
 		}
 	}
+}
+
+// OwnDevice is one device linked to the account. WhatsApp's device query gives
+// the device number only; the platform and push name are known for this
+// process's own device alone, and no last-seen time is available.
+type OwnDevice struct {
+	JID      string `json:"jid"`
+	Device   int    `json:"device"`
+	Self     bool   `json:"self,omitempty"`
+	Platform string `json:"platform,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+// OwnDevices lists the devices linked to this account: the primary phone
+// (device 0) and every companion, including this one.
+//
+// The list can come from whatsmeow's in-memory device cache. That cache has no
+// public way to drop an entry, so a long-lived daemon answers from it until a
+// device notification or its restart refreshes it; a notification the daemon
+// missed leaves it stale. The result is therefore evidence that a device IS
+// linked, which is what the slot check needs. It is weaker proof that a device
+// is GONE (the "PC device removed" check): confirm that after a daemon restart,
+// or on the phone under Linked devices.
+func (c *Client) OwnDevices(ctx context.Context) ([]OwnDevice, error) {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil || !cli.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+	if cli.Store == nil || cli.Store.ID == nil {
+		return nil, fmt.Errorf("not authenticated")
+	}
+	self := *cli.Store.ID
+	others, err := cli.GetUserDevices(ctx, []types.JID{self.ToNonAD()})
+	if err != nil {
+		return nil, fmt.Errorf("query linked devices: %w", err)
+	}
+	return mergeOwnDevices(self, cli.Store.Platform, cli.Store.PushName, others), nil
+}
+
+// mergeOwnDevices builds the sorted device list. GetUserDevices leaves the
+// local device out, so it is added from the store.
+func mergeOwnDevices(self types.JID, platform, name string, others []types.JID) []OwnDevice {
+	list := []OwnDevice{{JID: self.String(), Device: int(self.Device), Self: true, Platform: platform, Name: name}}
+	seen := map[int]bool{int(self.Device): true}
+	for _, d := range others {
+		if seen[int(d.Device)] {
+			continue
+		}
+		seen[int(d.Device)] = true
+		list = append(list, OwnDevice{JID: d.String(), Device: int(d.Device)})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Device < list[j].Device })
+	return list
 }

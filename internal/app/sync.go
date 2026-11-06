@@ -14,6 +14,7 @@ import (
 	"github.com/openclaw/wacli/internal/wa"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 )
 
 const maxAuthConnectAttempts = 3
@@ -77,7 +78,7 @@ type SyncOptions struct {
 	WebhookSecret       string
 	WebhookAllowPrivate bool
 	WebhookEvents       SyncWebhookEventSet // nil = messages only
-	Verbosity           int                 // future
+	afterHistorySync    func(*events.HistorySync)
 }
 
 type SyncResult struct {
@@ -85,6 +86,13 @@ type SyncResult struct {
 }
 
 func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
+	// Sync dials the connection itself, not through Connect. A delegate-only app
+	// belongs to a command that must not hold a session of its own (auth login,
+	// sync --once, a one-shot backfill); only the sync daemon's app is built
+	// without the flag.
+	if a.opts.DelegateOnly {
+		return SyncResult{}, ErrDelegateOnly
+	}
 	status := a.beginSyncStatus()
 	defer a.endSyncStatus(status)
 
@@ -94,6 +102,9 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 	if opts.PresenceMode == "" {
 		opts.PresenceMode = SyncPresenceModeNormal
 	}
+	// A quiet sync never shows as available, so WhatsApp would send nothing
+	// to a presence subscription delegated to it.
+	a.presenceWatch.setQuiet(!opts.PresenceMode.SendsAvailablePresence())
 	if (opts.Mode == SyncModeBootstrap || opts.Mode == SyncModeOnce) && opts.IdleExit <= 0 {
 		opts.IdleExit = 30 * time.Second
 	}
@@ -172,6 +183,10 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 		defer stopWebhook()
 	}
 
+	live := &liveSyncState{opts: opts, limits: limits, enqueueMedia: enqueueMedia}
+	a.liveSync.Store(live)
+	defer a.liveSync.CompareAndSwap(live, nil)
+
 	ps := &syncPresence{}
 	handlerID, appStateRecoveries := a.addSyncEventHandler(syncCtx, opts, &messagesStored, &lastEvent, disconnected, loggedOut, staleReconnect, enqueueMedia, enqueueWebhook, limits, ps, mediaQ)
 	defer a.wa.RemoveEventHandler(handlerID)
@@ -189,6 +204,8 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 		ps.cleanupStarted = true
 		ps.mu.Unlock()
 		a.wa.RemoveEventHandler(handlerID)
+		// No presence subscription goes out after this device leaves.
+		a.presenceWatch.stopRenewal()
 		a.sendPresenceBounded(types.PresenceUnavailable)
 	}()
 	now = nowUTC().UnixNano()
@@ -251,6 +268,11 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 	}
 	if err != nil {
 		return SyncResult{MessagesStored: messagesStored.Load()}, err
+	}
+	if opts.Mode != SyncModeFollow && syncCtx.Err() == nil && limits.canRecordFreshness() && a.wa.IsConnected() && a.wa.IsAuthed() {
+		if err := a.db.RecordSuccessfulSync(nowUTC()); err != nil {
+			return SyncResult{MessagesStored: messagesStored.Load()}, fmt.Errorf("record successful sync: %w", err)
+		}
 	}
 	return SyncResult{MessagesStored: messagesStored.Load()}, nil
 }
@@ -383,13 +405,31 @@ func chatKind(chat types.JID) string {
 	return "unknown"
 }
 
+// Content-free messages must not move the chat's activity timestamp.
+func (a *App) upsertMessageChat(pm wa.ParsedMessage, name string) error {
+	jid := canonicalJIDString(pm.Chat)
+	if pm.HasContent() {
+		return a.db.UpsertChat(jid, chatKind(pm.Chat), name, pm.Timestamp)
+	}
+	return a.db.UpsertChatMetadata(jid, chatKind(pm.Chat), name)
+}
+
 func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage) error {
 	pm.Chat = a.canonicalStoreJID(ctx, pm.Chat)
 	chatJID := canonicalJIDString(pm.Chat)
-	chatName := a.wa.ResolveChatName(ctx, pm.Chat, pm.PushName)
-	if pm.Chat != types.StatusBroadcastJID {
-		if err := a.db.UpsertChat(chatJID, chatKind(pm.Chat), chatName, pm.Timestamp); err != nil {
+	var chatName string
+	if pm.Chat.Server == types.GroupServer {
+		var err error
+		chatName, err = a.storeGroupChat(ctx, pm)
+		if err != nil {
 			return err
+		}
+	} else {
+		chatName = a.wa.ResolveChatName(ctx, pm.Chat, pm.PushName)
+		if pm.Chat != types.StatusBroadcastJID {
+			if err := a.upsertMessageChat(pm, chatName); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -432,13 +472,6 @@ func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage) error
 					info.BusinessName,
 				)
 			}
-		}
-	}
-
-	// Best-effort: store group metadata (and participants) when available.
-	if pm.Chat.Server == types.GroupServer {
-		if gi, err := a.wa.GetGroupInfo(ctx, pm.Chat); err == nil && gi != nil {
-			_ = a.storeGroupInfo(ctx, gi)
 		}
 	}
 

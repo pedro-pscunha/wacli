@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,7 +19,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const sourceVersion = "0.18.2"
+const sourceVersion = "0.22.0"
 
 var version string
 
@@ -50,6 +53,14 @@ type rootFlags struct {
 	timeout    time.Duration
 	readOnly   bool
 	lockWait   time.Duration
+	// delegateOnly makes every command that would connect to WhatsApp use the
+	// running sync daemon, and refuse when none runs.
+	delegateOnly bool
+	// isDaemon marks a process that runs the full sync with the store handler
+	// installed: `sync --follow` and `auth` login. Such a process may connect,
+	// because everything it receives is stored; the store lock still keeps it
+	// from running beside the daemon. `auth logout` is not one of them.
+	isDaemon bool
 }
 
 func execute(args []string) error {
@@ -77,6 +88,8 @@ func execute(args []string) error {
 	rootCmd.PersistentFlags().DurationVar(&flags.lockWait, "lock-wait", 0, "wait for the store lock before failing (write commands)")
 	rootCmd.PersistentFlags().BoolVar(&flags.readOnly, "read-only", false, "reject commands that intentionally write WhatsApp or the local store (or set WACLI_READONLY=1)")
 
+	rootCmd.PersistentFlags().BoolVar(&flags.delegateOnly, "delegate-only", false, "never connect to WhatsApp from this process: delegate to the running sync daemon or fail (or set WACLI_DELEGATE_ONLY=1)")
+
 	rootCmd.AddCommand(newVersionCmd())
 	rootCmd.AddCommand(newAccountsCmd(&flags))
 	rootCmd.AddCommand(newDoctorCmd(&flags))
@@ -92,11 +105,15 @@ func execute(args []string) error {
 	rootCmd.AddCommand(newChatsCmd(&flags))
 	rootCmd.AddCommand(newGroupsCmd(&flags))
 	rootCmd.AddCommand(newChannelsCmd(&flags))
+	rootCmd.AddCommand(newLabelsCmd(&flags))
 	rootCmd.AddCommand(newHistoryCmd(&flags))
 	rootCmd.AddCommand(newPresenceCmd(&flags))
 	rootCmd.AddCommand(newProfileCmd(&flags))
 	rootCmd.AddCommand(newDocsCmd(&flags))
+	rootCmd.AddCommand(newCapabilitiesCmd(&flags))
+	rootCmd.AddCommand(newDevicesCmd(&flags))
 	rootCmd.AddCommand(newStoreCmd(&flags))
+	rootCmd.AddCommand(newPendingSendsCmd(&flags))
 
 	rootCmd.SetArgs(args)
 	if err := rootCmd.Execute(); err != nil {
@@ -110,6 +127,11 @@ func writeRootError(flags rootFlags, err error) {
 	if err == nil {
 		return
 	}
+	var unknown *outcomeUnknownError
+	if errors.As(err, &unknown) {
+		writeOutcomeUnknown(flags, unknown.resp)
+		return
+	}
 	if flags.events {
 		_ = out.NewEventWriter(os.Stderr, true).Emit("error", map[string]any{"message": err.Error()})
 		return
@@ -117,10 +139,84 @@ func writeRootError(flags rootFlags, err error) {
 	_ = out.WriteError(os.Stderr, flags.asJSON, err)
 }
 
+// exitCodeFor gives resultado_incerto its own status, so a caller can tell
+// "check the phone before sending again" from an ordinary failure.
+func exitCodeFor(err error) int {
+	var unknown *outcomeUnknownError
+	if errors.As(err, &unknown) {
+		return exitCodeOutcomeUnknown
+	}
+	return 1
+}
+
+// writeOutcomeUnknown prints the typed answer. In JSON mode it is a regular
+// error envelope plus the machine fields, on stderr like every error.
+func writeOutcomeUnknown(flags rootFlags, resp sendDelegateResponse) {
+	if flags.asJSON {
+		body := map[string]any{
+			"success":         false,
+			"data":            nil,
+			"error":           resp.Error,
+			"code":            outcomeUnknownCode,
+			"outcome_unknown": true,
+			"id":              resp.ID,
+		}
+		b, _ := json.Marshal(body)
+		fmt.Fprintln(os.Stderr, string(b))
+		return
+	}
+	fmt.Fprintln(os.Stderr, out.SanitizeHuman(resp.Error))
+}
+
 func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool) (*app.App, *lock.Lock, error) {
+	return openApp(ctx, flags, needLock, allowUnauthed, false, false)
+}
+
+// newKindLocalApp is the App a localOK kind runs on when no daemon serves the store. It is ALWAYS delegate-only
+// and has no WhatsApp client, whatever the flags and the pin say: even a handler flagged localOK by mistake
+// cannot connect or build a client through it. The local contact run may still read session.db read-only
+// (mode=ro, under the store lock) for LID/PN mappings.
+func newKindLocalApp(ctx context.Context, flags *rootFlags) (*app.App, *lock.Lock, error) {
+	return openApp(ctx, flags, true, true, true, true)
+}
+
+// newLocalApp is newApp for a command that only works on the local store and
+// never connects (store cleanup, messages purge, contacts alias, ...). On a
+// pinned store it takes the lock normally while the daemon is down, because the
+// App it returns still refuses Connect. While the daemon runs it fails with
+// the maintenance message below instead of the connect refusal, which would
+// name the wrong cause.
+func newLocalApp(ctx context.Context, flags *rootFlags, allowUnauthed bool) (*app.App, *lock.Lock, error) {
+	return openApp(ctx, flags, true, allowUnauthed, true, false)
+}
+
+var errPinnedStoreMaintenance = errors.New("store is pinned to the sync daemon and the daemon is running: stop the daemon to run local maintenance on this store")
+
+func openApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool, localOnly bool, storeOnly bool) (*app.App, *lock.Lock, error) {
 	storeDir, err := resolveStoreDir(flags)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	pinned := flags.delegateOnlyFor(storeDir)
+	delegateOnly := pinned || storeOnly
+	if needLock && pinned {
+		// Decide from the daemon's socket, before the lock or wacli.db are
+		// touched: a refused call must not hold either, or it can block the
+		// daemon's own restart. A listening daemon means the store is in use,
+		// and the caller delegates; nothing listening means refuse.
+		listening := sendDelegateAvailable(ctx, storeDir)
+		switch {
+		case localOnly && listening:
+			return nil, nil, errPinnedStoreMaintenance
+		case localOnly:
+			// No daemon: the lock below is free, and DelegateOnly stays on, so
+			// the App cannot connect even by mistake.
+		case !listening:
+			return nil, nil, app.ErrDelegateOnly
+		default:
+			return nil, nil, fmt.Errorf("%w: the sync daemon serves this store (--delegate-only)", lock.ErrLocked)
+		}
 	}
 
 	var lk *lock.Lock
@@ -138,6 +234,8 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed 
 		Events:        out.NewEventWriter(os.Stderr, flags.events),
 		AllowUnauthed: allowUnauthed,
 		ReadOnly:      flags.isReadOnly(),
+		DelegateOnly:  delegateOnly,
+		NoClient:      storeOnly,
 	})
 	if err != nil {
 		if lk != nil {
@@ -180,6 +278,16 @@ func resolveStoreDir(flags *rootFlags) (string, error) {
 				return "", err
 			}
 			storeDir = resolved
+		} else if found && len(cfg.Accounts) > 0 {
+			// Accounts and no default_account: the account is a choice, never a fallback. The base store would be
+			// an empty one, so a read would answer "nothing" for an account that has messages.
+			names := make([]string, 0, len(cfg.Accounts))
+			for name := range cfg.Accounts {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			return "", fmt.Errorf("no account selected and no default_account in %s: pass --account (one of: %s)",
+				config.DefaultConfigPath(), strings.Join(names, ", "))
 		} else {
 			storeDir = config.DefaultStoreDir()
 		}
@@ -201,6 +309,34 @@ func (f *rootFlags) isReadOnly() bool {
 	default:
 		return false
 	}
+}
+
+func (f *rootFlags) isDelegateOnly() bool {
+	if f == nil || f.isDaemon {
+		return false
+	}
+	if f.delegateOnly {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WACLI_DELEGATE_ONLY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// delegateOnlyFor reports whether this call is delegate-only for storeDir: the
+// flag, the environment variable, or a per-store marker or account setting that
+// no caller can forget. The sync daemon itself is never delegate-only.
+func (f *rootFlags) delegateOnlyFor(storeDir string) bool {
+	if f != nil && f.isDaemon {
+		return false
+	}
+	if f.isDelegateOnly() {
+		return true
+	}
+	return config.StoreIsDelegateOnly(storeDir, config.DefaultConfigPath())
 }
 
 func (f *rootFlags) requireWritable() error {
