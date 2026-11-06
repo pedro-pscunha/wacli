@@ -58,17 +58,6 @@ func (f *daemonFakeWA) RemoveEventHandler(id uint32) {
 	defer f.mu.Unlock()
 	delete(f.handlers, id)
 }
-func (f *daemonFakeWA) emit(evt any) {
-	f.mu.Lock()
-	hs := make([]func(any), 0, len(f.handlers))
-	for _, h := range f.handlers {
-		hs = append(hs, h)
-	}
-	f.mu.Unlock()
-	for _, h := range hs {
-		h(evt)
-	}
-}
 func (f *daemonFakeWA) IsAuthed() bool { return true }
 func (f *daemonFakeWA) IsConnected() bool {
 	f.mu.Lock()
