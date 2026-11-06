@@ -126,6 +126,9 @@ type Options struct {
 	ReadOnly      bool
 	// DelegateOnly refuses Connect: only the sync daemon may hold a session.
 	DelegateOnly bool
+	// WA, when set, is used instead of opening the session store. Tests inject
+	// a fake client here; production leaves it nil.
+	WA WAClient
 }
 
 type App struct {
@@ -200,6 +203,9 @@ func (a *App) OpenWA() error {
 			return nil
 		}
 		return fmt.Errorf("read-only mode: command would open the WhatsApp session store")
+	}
+	if a.wa == nil && a.opts.WA != nil {
+		a.wa = a.opts.WA
 	}
 	if a.wa == nil {
 		sessionPath := filepath.Join(a.opts.StoreDir, "session.db")

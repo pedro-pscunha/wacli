@@ -466,6 +466,8 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 	}
 	ctx, cancel := context.WithTimeout(parent, millisDuration(req.TimeoutMS, 5*time.Minute))
 	defer cancel()
+	// Every kind run here runs in the daemon, which owns the one connection.
+	ctx = context.WithValue(ctx, daemonConnKey{}, true)
 	if req.NewID != "" {
 		if err := wa.ValidateMessageID(req.NewID); err != nil {
 			return sendDelegateResponse{}, err

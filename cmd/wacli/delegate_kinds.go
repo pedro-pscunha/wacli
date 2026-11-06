@@ -74,7 +74,7 @@ func executeRegisteredKind(ctx context.Context, a *app.App, req sendDelegateRequ
 	if !ok {
 		return sendDelegateResponse{}, fmt.Errorf("unsupported send kind %q", req.Kind)
 	}
-	res, err := h.run(context.WithValue(ctx, daemonConnKey{}, true), a, req)
+	res, err := h.run(ctx, a, req)
 	if err != nil {
 		return sendDelegateResponse{}, err
 	}

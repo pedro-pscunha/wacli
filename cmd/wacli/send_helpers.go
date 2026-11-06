@@ -137,14 +137,39 @@ func isRetryableSendError(err error) bool {
 		strings.Contains(msg, "info query timed out")
 }
 
+// reconnectForSend returns the reconnect step of a retried send. A process that
+// owns its own connection drops it and dials again. The sync daemon never does:
+// it holds the only session, a redial would race its sync loop, and a socket
+// opened inside a request dies with that request. In the daemon the step waits
+// for the daemon's own reconnect, up to the request deadline, and fails with a
+// clear "not sent" otherwise.
 func reconnectForSend(a interface {
 	WA() app.WAClient
 	Connect(context.Context, bool, func(string)) error
 }) func(context.Context) error {
 	return func(ctx context.Context) error {
+		if ctx.Value(daemonConnKey{}) != nil {
+			return waitForDaemonConnection(ctx, a.WA())
+		}
 		a.WA().Disconnect()
 		return a.Connect(ctx, false, nil)
 	}
+}
+
+var daemonConnectionPollInterval = 200 * time.Millisecond
+
+func waitForDaemonConnection(ctx context.Context, w interface{ IsConnected() bool }) error {
+	errNotConnected := errors.New("daemon not connected, not sent")
+	ticker := time.NewTicker(daemonConnectionPollInterval)
+	defer ticker.Stop()
+	for !w.IsConnected() {
+		select {
+		case <-ctx.Done():
+			return errNotConnected
+		case <-ticker.C:
+		}
+	}
+	return nil
 }
 
 func waitForPostSendRetryReceipts(ctx context.Context, d time.Duration) {
