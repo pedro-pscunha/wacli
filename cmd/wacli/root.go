@@ -173,8 +173,9 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed 
 }
 
 // newKindLocalApp is the App a localOK kind runs on when no daemon serves the store. It is ALWAYS delegate-only
-// and has no client, whatever the flags and the pin say: the kind only touches wacli.db, so even a handler
-// flagged localOK by mistake cannot connect or open the session store through it.
+// and has no WhatsApp client, whatever the flags and the pin say: even a handler flagged localOK by mistake
+// cannot connect or build a client through it. The local contact run may still read session.db read-only
+// (mode=ro, under the store lock) for LID/PN mappings.
 func newKindLocalApp(ctx context.Context, flags *rootFlags) (*app.App, *lock.Lock, error) {
 	return openApp(ctx, flags, true, true, true, true)
 }
@@ -197,8 +198,9 @@ func openApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed
 		return nil, nil, err
 	}
 
-	delegateOnly := flags.delegateOnlyFor(storeDir) || storeOnly
-	if needLock && flags.delegateOnlyFor(storeDir) {
+	pinned := flags.delegateOnlyFor(storeDir)
+	delegateOnly := pinned || storeOnly
+	if needLock && pinned {
 		// Decide from the daemon's socket, before the lock or wacli.db are
 		// touched: a refused call must not hold either, or it can block the
 		// daemon's own restart. A listening daemon means the store is in use,

@@ -141,7 +141,7 @@ func applySendMeta(out any, r sendDelegateResponse) {
 // callKind validates a registered kind, then runs it where the kind says (see kindHandler): on the daemon
 // when one holds the store, otherwise in this process. The result type is the same on both paths.
 // kindDaemonListening is the first dial of callKind. A test replaces it to place the daemon between the dial
-// and the lock attempt.
+// and the lock attempt. Production code never assigns it.
 var kindDaemonListening = sendDelegateAvailable
 
 func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequest) (T, error) {

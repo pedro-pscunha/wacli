@@ -60,7 +60,7 @@ func canonicalContactJID(raw string) (string, error) {
 
 // validateContactLabel checks an alias or a tag. It must be valid UTF-8 (invalid bytes would be stored raw on the
 // local path and as U+FFFD on the daemon path, two different values for one input), not blank, at most 100
-// characters, and free of control (Cc), format (Cf: bidi overrides such as U+202E, zero-width U+200B, U+FEFF) and
+// characters, and free of control (Cc), format (Cf: bidi overrides such as U+202E, zero-width U+200B, U+2060, U+FEFF, U+00AD; U+200C and U+200D stay allowed for emoji ZWJ sequences) and
 // line or paragraph separator (Zl, Zp) characters. Labels appear in lists, filters and the gateway's read API,
 // and those characters can reorder, hide or split what a reader sees.
 func validateContactLabel(flag, value string) error {
@@ -75,7 +75,7 @@ func validateContactLabel(flag, value string) error {
 		return fmt.Errorf("%s is %d characters; the limit is %d", flag, n, maxContactLabelRunes)
 	}
 	for _, r := range v {
-		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
+		if r != 0x200C && r != 0x200D && unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return fmt.Errorf("%s must not contain control, format or separator characters (found U+%04X)", flag, r)
 		}
 	}

@@ -47,7 +47,8 @@ type daemonFakeWA struct {
 	// than the typed number (the Brazilian ninth digit).
 	rewriteOnWhatsApp func(phone string) (types.JID, bool)
 
-	lidMap map[string]string // lid user -> pn user, learned while the daemon runs
+	userInfoCalls int
+	lidMap        map[string]string // lid user -> pn user, learned while the daemon runs
 }
 
 func newDaemonFakeWA() *daemonFakeWA {
@@ -100,9 +101,24 @@ func (f *daemonFakeWA) learnLID(lid, pn string) {
 	}
 	f.lidMap[lid] = pn
 }
+
+// ResolvePNToLIDStoreOnly reads the mapping only. ResolvePNToLID counts a user-info query on a miss, as the real
+// client does.
+func (f *daemonFakeWA) ResolvePNToLIDStoreOnly(_ context.Context, j types.JID) types.JID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lookupPNLocked(j)
+}
 func (f *daemonFakeWA) ResolvePNToLID(_ context.Context, j types.JID) types.JID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if got := f.lookupPNLocked(j); got != j {
+		return got
+	}
+	f.userInfoCalls++
+	return j
+}
+func (f *daemonFakeWA) lookupPNLocked(j types.JID) types.JID {
 	for lid, pn := range f.lidMap {
 		if j.Server == types.DefaultUserServer && j.User == pn {
 			return types.JID{User: lid, Server: types.HiddenUserServer}

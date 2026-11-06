@@ -12,6 +12,12 @@ import (
 // resolvePNToLID uses the supplied session, falling back to the original JID
 // when neither its stored mappings nor a user-info lookup resolves it.
 func resolvePNToLID(ctx context.Context, cli *whatsmeow.Client, jid types.JID) types.JID {
+	return resolvePNToLIDMode(ctx, cli, jid, true)
+}
+
+// resolvePNToLIDMode is resolvePNToLID with the network lookup optional. With query false it reads only the
+// session store: no usync IQ leaves the process.
+func resolvePNToLIDMode(ctx context.Context, cli *whatsmeow.Client, jid types.JID, query bool) types.JID {
 	if cli == nil || cli.Store == nil {
 		return jid
 	}
@@ -27,6 +33,9 @@ func resolvePNToLID(ctx context.Context, cli *whatsmeow.Client, jid types.JID) t
 	lid, err := cli.Store.LIDs.GetLIDForPN(ctx, pn)
 	if err == nil && !lid.IsEmpty() {
 		return lid
+	}
+	if !query {
+		return jid
 	}
 	info, err := cli.GetUserInfo(ctx, []types.JID{pn})
 	if err == nil {
@@ -102,6 +111,18 @@ func (c *Client) ResolvePNToLID(ctx context.Context, jid types.JID) types.JID {
 	cli := c.client
 	c.mu.Unlock()
 	return resolvePNToLID(ctx, cli, jid)
+}
+
+// ResolvePNToLIDStoreOnly is ResolvePNToLID without the user-info lookup: it reads the session store and the own
+// JID only, so it never sends a query to WhatsApp.
+func (c *Client) ResolvePNToLIDStoreOnly(ctx context.Context, jid types.JID) types.JID {
+	if jid.Server != types.DefaultUserServer {
+		return jid
+	}
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	return resolvePNToLIDMode(ctx, cli, jid, false)
 }
 
 func BestContactName(info types.ContactInfo) string {

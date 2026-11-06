@@ -113,10 +113,30 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
 // its first use (or reads torn pages during a write) and fails by returning "no mapping", silently. So the
 // daemon never uses it. A short-lived command that holds the store lock and has no client uses the read-only
 // handle, which is safe for that lifetime.
+// storeOnlyResolver is the live client's view of the session store for the connection-free kinds. The live
+// ResolvePNToLID falls back to a usync query to WhatsApp on a miss; a kind that is declared connection-free and
+// unpaced must not send that, so PN to LID reads the store only. The other two methods already do.
+type storeOnlyResolver struct{ live app.WAClient }
+
+func (r storeOnlyResolver) ResolveChatName(ctx context.Context, j types.JID, push string) string {
+	return r.live.ResolveChatName(ctx, j, push)
+}
+func (r storeOnlyResolver) ResolveLIDToPN(ctx context.Context, j types.JID) types.JID {
+	return r.live.ResolveLIDToPN(ctx, j)
+}
+func (r storeOnlyResolver) ResolvePNToLID(ctx context.Context, j types.JID) types.JID {
+	if so, ok := r.live.(interface {
+		ResolvePNToLIDStoreOnly(context.Context, types.JID) types.JID
+	}); ok {
+		return so.ResolvePNToLIDStoreOnly(ctx, j)
+	}
+	return j // a client without the store-only lookup: no mapping, never a query
+}
+
 func contactReadResolver(ctx context.Context, a *app.App) (app.LocalResolver, error) {
 	if ctx.Value(daemonConnKey{}) != nil {
 		if live := a.WA(); live != nil {
-			return live, nil
+			return storeOnlyResolver{live}, nil
 		}
 		return nil, errors.New("the sync daemon has no WhatsApp client to resolve contact identities")
 	}

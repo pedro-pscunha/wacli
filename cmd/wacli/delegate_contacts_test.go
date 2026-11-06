@@ -246,6 +246,12 @@ func TestDaemonResolvesContactIdentitiesThroughTheLiveClient(t *testing.T) {
 	if c, _ := db.GetContact(pn + "@s.whatsapp.net"); len(c.Tags) != 1 || c.Tags[0] != "obra" {
 		t.Fatalf("tag typed as a LID did not reach the phone identity: %+v", c)
 	}
+	f.mu.Lock()
+	queries := f.userInfoCalls
+	f.mu.Unlock()
+	if queries != 0 {
+		t.Fatalf("the contact kinds sent %d user-info queries to WhatsApp, want 0", queries)
+	}
 	fx.noRedial(t)
 }
 
@@ -257,6 +263,8 @@ func TestContactLabelRejectsFormatSeparatorAndInvalidUTF8(t *testing.T) {
 		"BOM U+FEFF":           "\ufeffabc",
 		"line sep U+2028":      "a\u2028b",
 		"para sep U+2029":      "a\u2029b",
+		"word joiner U+2060":   "a\u2060b",
+		"soft hyphen U+00AD":   "a\u00adb",
 		"NUL":                  "a\x00b",
 		"tab":                  "a\tb",
 		"invalid utf-8":        "a\xffb",
@@ -266,7 +274,7 @@ func TestContactLabelRejectsFormatSeparatorAndInvalidUTF8(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	for _, ok := range []string{"Obra A", "Concreto & Cia", "São José", "fornecedor 2", "日本語", "a b"} {
+	for _, ok := range []string{"Obra A", "Concreto & Cia", "São José", "fornecedor 2", "日本語", "a b", "Zé 👨\u200d🌾", "👩\u200d💻 TI", "🏳\ufe0f\u200d🌈"} {
 		if err := validateContactLabel("--alias", ok); err != nil {
 			t.Errorf("%q refused: %v", ok, err)
 		}
