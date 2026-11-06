@@ -12,11 +12,15 @@ import (
 	"github.com/openclaw/wacli/internal/wa"
 )
 
-// A registered kind is a command that must run on the daemon's connection when
-// a daemon runs, and on its own connection otherwise (never with
-// --delegate-only). Each kind has one validator, run by the client before any
-// I/O and again by the daemon, and one handler, run by whichever process holds
-// the connection. The handler's result travels back as sendDelegateResponse.Data.
+// A registered kind is a command with one validator, run by the client before any I/O and again by the
+// daemon, and one handler. Where the handler runs depends on the kind:
+//
+//   - a connecting kind runs on the sync daemon's connection when a daemon holds the store, and on its own
+//     connection otherwise, never under --delegate-only or on a pinned store (those refuse to connect);
+//   - a localOK kind needs no connection at all: it runs on the daemon when one listens, otherwise locally
+//     under the store lock, and it also runs under --delegate-only and on a pinned store.
+//
+// The handler's result travels back as sendDelegateResponse.Data.
 type kindHandler struct {
 	validate func(sendDelegateRequest) error
 	run      func(context.Context, *app.App, sendDelegateRequest) (any, error)
@@ -27,8 +31,9 @@ type kindHandler struct {
 	// localOK marks a kind that only reads or writes the local store and never
 	// touches the WhatsApp connection. With a daemon listening the call goes to it
 	// (it holds the store); with none, the command runs the handler itself under
-	// the store lock, even on a pinned store, because the App it gets still
-	// refuses to connect.
+	// the store lock, even on a pinned store. The App it gets is ALWAYS built
+	// delegate-only (see openApp), so a handler flagged by mistake cannot connect,
+	// and TestLocalOKKindsAreExactly pins the set of kinds that carry this flag.
 	localOK bool
 	// slot says which queue the kind runs on. The zero value is the send queue.
 	slot slotKind
@@ -133,9 +138,12 @@ func applySendMeta(out any, r sendDelegateResponse) {
 	}
 }
 
-// callKind validates a registered kind, then runs it on the daemon (lock held
-// by it) or on this process's own connection. The result type is the same on
-// both paths.
+// callKind validates a registered kind, then runs it where the kind says (see kindHandler): on the daemon
+// when one holds the store, otherwise in this process. The result type is the same on both paths.
+// kindDaemonListening is the first dial of callKind. A test replaces it to place the daemon between the dial
+// and the lock attempt.
+var kindDaemonListening = sendDelegateAvailable
+
 func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequest) (T, error) {
 	var zero T
 	h, ok := delegateHandlers[req.Kind]
@@ -145,24 +153,15 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 	if err := validateDelegateRequest(req); err != nil {
 		return zero, err
 	}
-	var (
-		a   *app.App
-		lk  *lock.Lock
-		err error
-	)
-	if h.localOK {
-		if sendDelegateAvailable(ctx, mustStoreDir(flags)) {
-			err = fmt.Errorf("%w: the sync daemon serves this store", lock.ErrLocked)
-		} else {
-			a, lk, err = newLocalApp(ctx, flags, false)
-		}
-	} else {
-		a, lk, err = newApp(ctx, flags, true, false)
-	}
+	storeDir, err := resolveStoreDir(flags)
 	if err != nil {
-		resp, delegated, derr := tryDelegateSend(ctx, flags, err, req)
+		return zero, err
+	}
+	// delegateTo asks the daemon. It is the one place a kind goes to the daemon.
+	delegateTo := func(cause error) (T, error) {
+		resp, delegated, derr := tryDelegateSend(ctx, flags, cause, req)
 		if !delegated {
-			return zero, err
+			return zero, cause
 		}
 		if derr != nil {
 			return zero, derr
@@ -175,6 +174,28 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 		}
 		applySendMeta(&out, resp)
 		return out, nil
+	}
+	var (
+		a  *app.App
+		lk *lock.Lock
+	)
+	if h.localOK {
+		// The decision is taken once, here. A daemon that listens serves the request. Otherwise the local
+		// run takes the store lock; if a daemon started in between, that lock is held and the same
+		// delegation answers instead of a maintenance refusal.
+		if kindDaemonListening(ctx, storeDir) {
+			return delegateTo(fmt.Errorf("%w: the sync daemon serves this store", lock.ErrLocked))
+		}
+		a, lk, err = newKindLocalApp(ctx, flags)
+		if errors.Is(err, errPinnedStoreMaintenance) {
+			// The daemon bound its socket after our dial: delegate instead of telling the caller to stop it.
+			return delegateTo(fmt.Errorf("%w: the sync daemon started while this call was running", lock.ErrLocked))
+		}
+	} else {
+		a, lk, err = newApp(ctx, flags, true, false)
+	}
+	if err != nil {
+		return delegateTo(err)
 	}
 	defer closeApp(a, lk)
 	if !h.localOK {
@@ -236,14 +257,4 @@ func validateTargetMessageID(flag, id string) error {
 		return fmt.Errorf("invalid %s %q", flag, id)
 	}
 	return nil
-}
-
-// mustStoreDir is the store directory of a call whose flags already resolved once; an
-// error here means the flags are unusable, and the dial that follows fails the same way.
-func mustStoreDir(flags *rootFlags) string {
-	dir, err := resolveStoreDir(flags)
-	if err != nil {
-		return ""
-	}
-	return dir
 }

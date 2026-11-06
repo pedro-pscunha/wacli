@@ -46,6 +46,8 @@ type daemonFakeWA struct {
 	// rewriteOnWhatsApp models the registration check returning a different JID
 	// than the typed number (the Brazilian ninth digit).
 	rewriteOnWhatsApp func(phone string) (types.JID, bool)
+
+	lidMap map[string]string // lid user -> pn user, learned while the daemon runs
 }
 
 func newDaemonFakeWA() *daemonFakeWA {
@@ -88,8 +90,34 @@ func (f *daemonFakeWA) calls() (connects, disconnects int) {
 func (f *daemonFakeWA) LinkedJID() string                                         { return "5511000000000@s.whatsapp.net" }
 func (f *daemonFakeWA) LinkedLID() string                                         { return "" }
 func (f *daemonFakeWA) ResolveChatName(context.Context, types.JID, string) string { return "chat" }
-func (f *daemonFakeWA) ResolvePNToLID(_ context.Context, j types.JID) types.JID   { return j }
-func (f *daemonFakeWA) ResolveLIDToPN(_ context.Context, j types.JID) types.JID   { return j }
+
+// learnLID models whatsmeow learning a LID/PN mapping while the daemon runs.
+func (f *daemonFakeWA) learnLID(lid, pn string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lidMap == nil {
+		f.lidMap = map[string]string{}
+	}
+	f.lidMap[lid] = pn
+}
+func (f *daemonFakeWA) ResolvePNToLID(_ context.Context, j types.JID) types.JID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for lid, pn := range f.lidMap {
+		if j.Server == types.DefaultUserServer && j.User == pn {
+			return types.JID{User: lid, Server: types.HiddenUserServer}
+		}
+	}
+	return j
+}
+func (f *daemonFakeWA) ResolveLIDToPN(_ context.Context, j types.JID) types.JID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if pn, ok := f.lidMap[j.User]; ok && j.Server == types.HiddenUserServer {
+		return types.JID{User: pn, Server: types.DefaultUserServer}
+	}
+	return j
+}
 func (f *daemonFakeWA) GetUserInfo(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) {
 	return nil, nil
 }

@@ -169,7 +169,14 @@ func writeOutcomeUnknown(flags rootFlags, resp sendDelegateResponse) {
 }
 
 func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool) (*app.App, *lock.Lock, error) {
-	return openApp(ctx, flags, needLock, allowUnauthed, false)
+	return openApp(ctx, flags, needLock, allowUnauthed, false, false)
+}
+
+// newKindLocalApp is the App a localOK kind runs on when no daemon serves the store. It is ALWAYS delegate-only
+// and has no client, whatever the flags and the pin say: the kind only touches wacli.db, so even a handler
+// flagged localOK by mistake cannot connect or open the session store through it.
+func newKindLocalApp(ctx context.Context, flags *rootFlags) (*app.App, *lock.Lock, error) {
+	return openApp(ctx, flags, true, true, true, true)
 }
 
 // newLocalApp is newApp for a command that only works on the local store and
@@ -179,19 +186,19 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed 
 // the maintenance message below instead of the connect refusal, which would
 // name the wrong cause.
 func newLocalApp(ctx context.Context, flags *rootFlags, allowUnauthed bool) (*app.App, *lock.Lock, error) {
-	return openApp(ctx, flags, true, allowUnauthed, true)
+	return openApp(ctx, flags, true, allowUnauthed, true, false)
 }
 
 var errPinnedStoreMaintenance = errors.New("store is pinned to the sync daemon and the daemon is running: stop the daemon to run local maintenance on this store")
 
-func openApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool, localOnly bool) (*app.App, *lock.Lock, error) {
+func openApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool, localOnly bool, storeOnly bool) (*app.App, *lock.Lock, error) {
 	storeDir, err := resolveStoreDir(flags)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	delegateOnly := flags.delegateOnlyFor(storeDir)
-	if needLock && delegateOnly {
+	delegateOnly := flags.delegateOnlyFor(storeDir) || storeOnly
+	if needLock && flags.delegateOnlyFor(storeDir) {
 		// Decide from the daemon's socket, before the lock or wacli.db are
 		// touched: a refused call must not hold either, or it can block the
 		// daemon's own restart. A listening daemon means the store is in use,
@@ -226,6 +233,7 @@ func openApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed
 		AllowUnauthed: allowUnauthed,
 		ReadOnly:      flags.isReadOnly(),
 		DelegateOnly:  delegateOnly,
+		NoClient:      storeOnly,
 	})
 	if err != nil {
 		if lk != nil {

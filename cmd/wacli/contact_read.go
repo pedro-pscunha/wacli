@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ type contactDisplay struct {
 }
 
 func searchContactsForDisplay(ctx context.Context, a *app.App, query string, limit int) ([]store.Contact, error) {
-	resolver, err := contactReadResolver(a)
+	resolver, err := contactReadResolver(ctx, a)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +68,7 @@ func searchContactsForDisplay(ctx context.Context, a *app.App, query string, lim
 }
 
 func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store.Contact, error) {
-	resolver, err := contactReadResolver(a)
+	resolver, err := contactReadResolver(ctx, a)
 	if err != nil {
 		return store.Contact{}, err
 	}
@@ -104,7 +105,21 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
 	return store.Contact{}, sql.ErrNoRows
 }
 
-func contactReadResolver(a *app.App) (app.LocalResolver, error) {
+// contactReadResolver returns the LID/PN resolver for contact metadata.
+//
+// In the sync daemon it is the live client: whatsmeow learns LID/PN mappings while the daemon runs, and the
+// read-only handle on session.db is opened with immutable=1 whenever no journal sidecar exists, which tells
+// SQLite the file never changes. A handle like that, kept for the daemon's life, answers from the state at
+// its first use (or reads torn pages during a write) and fails by returning "no mapping", silently. So the
+// daemon never uses it. A short-lived command that holds the store lock and has no client uses the read-only
+// handle, which is safe for that lifetime.
+func contactReadResolver(ctx context.Context, a *app.App) (app.LocalResolver, error) {
+	if ctx.Value(daemonConnKey{}) != nil {
+		if live := a.WA(); live != nil {
+			return live, nil
+		}
+		return nil, errors.New("the sync daemon has no WhatsApp client to resolve contact identities")
+	}
 	if _, err := os.Stat(filepath.Join(a.StoreDir(), "session.db")); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -132,7 +147,7 @@ func resolveContactReadJID(ctx context.Context, resolver app.LocalResolver, rawJ
 }
 
 func contactMetadataJIDs(ctx context.Context, a *app.App, rawJID string) ([]string, error) {
-	resolver, err := contactReadResolver(a)
+	resolver, err := contactReadResolver(ctx, a)
 	if err != nil {
 		return nil, err
 	}

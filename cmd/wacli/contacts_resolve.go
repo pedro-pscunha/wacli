@@ -48,7 +48,7 @@ func newContactsResolveCmd(flags *rootFlags) *cobra.Command {
 			}
 			defer closeApp(a, lk)
 
-			resolver, err := contactReadResolver(a)
+			resolver, err := contactReadResolver(ctx, a)
 			if err != nil {
 				return err
 			}

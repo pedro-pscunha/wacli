@@ -114,6 +114,9 @@ type WAClient interface {
 	GetBusinessProfile(ctx context.Context, jid types.JID) (*types.BusinessProfile, error)
 }
 
+// ErrNoClient is returned by OpenWA when the app was built with NoClient.
+var ErrNoClient = errors.New("this command works on the local store only and may not open the WhatsApp session")
+
 // ErrDelegateOnly is returned by Connect when the app is delegate-only.
 var ErrDelegateOnly = errors.New("daemon not running; refusing to connect outside the sync daemon (--delegate-only)")
 
@@ -126,6 +129,9 @@ type Options struct {
 	ReadOnly      bool
 	// DelegateOnly refuses Connect: only the sync daemon may hold a session.
 	DelegateOnly bool
+	// NoClient makes OpenWA refuse: the App works on the local store alone and must never build a WhatsApp
+	// client, not even an unconnected one. Set for kinds that only read or write wacli.db.
+	NoClient bool
 	// WA, when set, is used instead of opening the session store. Tests inject
 	// a fake client here; production leaves it nil.
 	WA WAClient
@@ -220,6 +226,9 @@ func New(opts Options) (*App, error) {
 func (a *App) OpenWA() error {
 	a.waMu.Lock()
 	defer a.waMu.Unlock()
+	if a.opts.NoClient {
+		return ErrNoClient
+	}
 	if a.opts.ReadOnly {
 		if a.wa != nil {
 			return nil

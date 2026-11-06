@@ -194,11 +194,12 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, Alias: alias, SubAction: "set"}); err != nil {
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, Alias: alias, SubAction: "set"})
+			if err != nil {
 				return err
 			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "alias": alias})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "alias": res.Alias})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil
@@ -217,11 +218,15 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, SubAction: "rm"}); err != nil {
+			// --alias is a persistent flag of the alias command, so it parses on rm too; pass it on so the
+			// validator refuses it instead of dropping it silently.
+			alias, _ := cmd.Flags().GetString("alias")
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactAliasKind, To: jid, Alias: alias, SubAction: "rm"})
+			if err != nil {
 				return err
 			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "removed": true})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "removed": true})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil
@@ -252,11 +257,12 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "add"}); err != nil {
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "add"})
+			if err != nil {
 				return err
 			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "tag": tag})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "tag": res.Tag})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil
@@ -276,11 +282,12 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			if _, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "rm"}); err != nil {
+			res, err := callKind[contactAckResult](ctx, flags, sendDelegateRequest{Kind: contactTagKind, To: jid, Tag: tag, SubAction: "rm"})
+			if err != nil {
 				return err
 			}
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid, "tag": tag, "removed": true})
+				return out.WriteJSON(os.Stdout, map[string]any{"jid": res.JID, "tag": res.Tag, "removed": true})
 			}
 			fmt.Fprintln(os.Stdout, "OK")
 			return nil
