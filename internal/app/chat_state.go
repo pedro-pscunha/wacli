@@ -104,6 +104,19 @@ func (a *App) PinChat(ctx context.Context, jid types.JID, pin bool) error {
 	})
 }
 
+// DeleteMessageForMe removes one message for this account only. It is a
+// RegularHigh app-state write, the same collection as MuteChat, so it takes the
+// chat-state gate and the pre-write sync: two writers on one collection must not
+// race, and a lagging collection is repaired before the patch is sent.
+func (a *App) DeleteMessageForMe(ctx context.Context, info types.MessageInfo, deleteMedia bool) error {
+	release, err := a.beginChatStateWrite(ctx, appstate.WAPatchRegularHigh)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return a.wa.DeleteMessageForMe(ctx, info, deleteMedia)
+}
+
 func (a *App) MuteChat(ctx context.Context, jid types.JID, mute bool, duration time.Duration) error {
 	release, err := a.beginChatStateWrite(ctx, appstate.WAPatchRegularHigh)
 	if err != nil {

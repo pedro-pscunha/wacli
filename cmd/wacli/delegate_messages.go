@@ -235,9 +235,9 @@ func deleteMessageForMe(ctx context.Context, a *app.App, req sendDelegateRequest
 	if err != nil {
 		return deleteForMeResult{}, err
 	}
-	if _, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, a.WA().DeleteMessageForMe(ctx, info, req.DeleteMedia)
-	}); err != nil {
+	// An app-state write: it goes through the App's chat-state gate, not the
+	// message send retry, and the daemon's queue does not pace it.
+	if err := a.DeleteMessageForMe(ctx, info, req.DeleteMedia); err != nil {
 		return deleteForMeResult{}, err
 	}
 	mediaPaths, err := a.DB().MessageLocalMediaPaths(msg.ChatJID, msg.MsgID)

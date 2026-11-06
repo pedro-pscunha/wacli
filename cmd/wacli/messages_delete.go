@@ -36,6 +36,9 @@ func newMessagesDeleteCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if forMe && newMsgID != "" {
+				return fmt.Errorf("--new-id does not apply to --for-me: delete for me sends no message")
+			}
 			if err := validateNewMessageID(newMsgID); err != nil {
 				return err
 			}
