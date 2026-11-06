@@ -46,39 +46,11 @@ var schemaMigrations = []migration{
 	{version: 30, name: "retrieval identity, revision and sync state", up: migrateRetrieval},
 	{version: 31, name: "content-free message change journal", up: migrateChanges},
 	{version: 32, name: "message receipt retrieval revisions", up: migrateReceiptRetrieval},
-	{version: 33, name: "own message id lookup index", up: migrateOwnMessageIDIndex},
-	{version: 34, name: "pending sends", up: migratePendingSends},
-}
-
-// migratePendingSends creates the table that records a send with a caller-chosen
-// id before it goes on the wire. It is separate from messages so an unfinished
-// send never shows up in a chat. An older binary ignores the table.
-func migratePendingSends(d *DB) error {
-	if _, err := d.sql.Exec(`
-		CREATE TABLE IF NOT EXISTS pending_sends (
-			msg_id TEXT PRIMARY KEY,
-			chat_jid TEXT NOT NULL,
-			state TEXT NOT NULL,
-			created_at INTEGER NOT NULL
-		)`); err != nil {
-		return fmt.Errorf("create pending_sends table: %w", err)
-	}
-	return nil
-}
-
-// migrateOwnMessageIDIndex lets FindOwnMessage find a sent message by its id
-// without scanning the table: the primary key is (chat_jid, msg_id), so msg_id
-// alone has no usable index. The index is partial, so it holds only the
-// messages this account sent. An older binary ignores the extra migration row.
-func migrateOwnMessageIDIndex(d *DB) error {
-	hasMessages, err := d.tableExists("messages")
-	if err != nil || !hasMessages {
-		return err
-	}
-	if _, err := d.sql.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_msgid_fromme ON messages(msg_id) WHERE from_me = 1`); err != nil {
-		return fmt.Errorf("create own message id index: %w", err)
-	}
-	return nil
+	// Fork-only migrations live in a reserved range far above upstream's, so a
+	// rebase onto an upstream that adds its own 33, 34, ... cannot collide with
+	// them: the runner skips any applied version number regardless of its name.
+	{version: forkMigrationBase + 1, name: "fork: own message id lookup index", up: migrateOwnMessageIDIndex},
+	{version: forkMigrationBase + 2, name: "fork: pending sends", up: migratePendingSends},
 }
 
 func migratePlaceholderChatActivity(d *DB) error {
@@ -441,6 +413,82 @@ func migrateMessagesMediaUnavailableColumn(d *DB) error {
 	return nil
 }
 
+// forkMigrationBase is the first version number of this fork's own migrations.
+const forkMigrationBase = 1000
+
+// migrateOwnMessageIDIndex lets FindOwnMessage find a sent message by its id
+// without scanning the table: the primary key is (chat_jid, msg_id), so msg_id
+// alone has no usable index. The index is partial, so it holds only the
+// messages this account sent. An older binary ignores the extra migration row.
+func migrateOwnMessageIDIndex(d *DB) error {
+	hasMessages, err := d.tableExists("messages")
+	if err != nil || !hasMessages {
+		return err
+	}
+	if _, err := d.sql.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_msgid_fromme ON messages(msg_id) WHERE from_me = 1`); err != nil {
+		return fmt.Errorf("create own message id index: %w", err)
+	}
+	return nil
+}
+
+// migratePendingSends creates the table that records a send with a caller-chosen
+// id before it goes on the wire. It is separate from messages so an unfinished
+// send never shows up in a chat. An older binary ignores the table.
+//
+// kind and content_hash let a retry tell "the same message again" from "an id
+// reused for another message"; typed_to is the recipient as the caller typed it,
+// which is not always the JID the send stored under.
+func migratePendingSends(d *DB) error {
+	if _, err := d.sql.Exec(`
+		CREATE TABLE IF NOT EXISTS pending_sends (
+			msg_id TEXT PRIMARY KEY,
+			chat_jid TEXT NOT NULL,
+			typed_to TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL DEFAULT '',
+			content_hash TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`); err != nil {
+		return fmt.Errorf("create pending_sends table: %w", err)
+	}
+	return nil
+}
+
+// reconcileForkMigrations renames this fork's pre-release migration rows (33 and
+// 34) to the reserved range, so a store that applied them is not migrated twice
+// and upstream's own 33 and 34 stay free. The names are checked: a row with the
+// same number but another name belongs to upstream and is left alone.
+func reconcileForkMigrations(d *DB) error {
+	for _, m := range []struct {
+		old, new int
+		oldName  string
+		newName  string
+	}{
+		{33, forkMigrationBase + 1, "own message id lookup index", "fork: own message id lookup index"},
+		{34, forkMigrationBase + 2, "pending sends", "fork: pending sends"},
+	} {
+		var name string
+		err := d.sql.QueryRow(`SELECT name FROM schema_migrations WHERE version = ?`, m.old).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("check migration %d: %w", m.old, err)
+		}
+		if name != m.oldName {
+			continue
+		}
+		if _, err := d.sql.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name, applied_at)
+			SELECT ?, ?, applied_at FROM schema_migrations WHERE version = ?`, m.new, m.newName, m.old); err != nil {
+			return fmt.Errorf("renumber migration %d: %w", m.old, err)
+		}
+		if _, err := d.sql.Exec(`DELETE FROM schema_migrations WHERE version = ? AND name = ?`, m.old, m.oldName); err != nil {
+			return fmt.Errorf("drop old migration row %d: %w", m.old, err)
+		}
+	}
+	return nil
+}
+
 func (d *DB) ensureSchema() error {
 	if _, err := d.sql.Exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -453,6 +501,9 @@ func (d *DB) ensureSchema() error {
 	}
 
 	if err := reconcilePreReleaseRetrievalMigrations(d); err != nil {
+		return err
+	}
+	if err := reconcileForkMigrations(d); err != nil {
 		return err
 	}
 
@@ -500,6 +551,12 @@ func (d *DB) ensureCurrentSchema() error {
 	// row exists but the expected object does not.
 	if err := migratePolls(d); err != nil {
 		return fmt.Errorf("ensure current polls schema: %w", err)
+	}
+	if err := migrateOwnMessageIDIndex(d); err != nil {
+		return fmt.Errorf("ensure current own message id index: %w", err)
+	}
+	if err := ensurePendingSendsColumns(d); err != nil {
+		return fmt.Errorf("ensure current pending sends schema: %w", err)
 	}
 	if err := migrateCallEvents(d); err != nil {
 		return fmt.Errorf("ensure current call events schema: %w", err)
@@ -1094,6 +1151,8 @@ func tableInfoPragma(table string) (string, error) {
 		return `PRAGMA table_info("messages_fts")`, nil
 	case "status_messages":
 		return `PRAGMA table_info("status_messages")`, nil
+	case "pending_sends":
+		return `PRAGMA table_info("pending_sends")`, nil
 	default:
 		return "", fmt.Errorf("unsupported table %q", table)
 	}
@@ -1123,4 +1182,29 @@ func migrateUnavailableAppStateKeys(d *DB) error {
   PRIMARY KEY(account_jid,key_id)
  )`)
 	return err
+}
+
+// ensurePendingSendsColumns adds the columns a store gets from the first version
+// of the table (msg_id, chat_jid, state, created_at), and creates the table when
+// it is missing.
+func ensurePendingSendsColumns(d *DB) error {
+	if err := migratePendingSends(d); err != nil {
+		return err
+	}
+	for _, col := range []struct{ name, ddl string }{
+		{"typed_to", `ALTER TABLE pending_sends ADD COLUMN typed_to TEXT NOT NULL DEFAULT ''`},
+		{"kind", `ALTER TABLE pending_sends ADD COLUMN kind TEXT NOT NULL DEFAULT ''`},
+		{"content_hash", `ALTER TABLE pending_sends ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`},
+	} {
+		has, err := d.tableHasColumn("pending_sends", col.name)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := d.sql.Exec(col.ddl); err != nil {
+				return fmt.Errorf("add pending_sends.%s: %w", col.name, err)
+			}
+		}
+	}
+	return nil
 }
