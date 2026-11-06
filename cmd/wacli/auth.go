@@ -96,6 +96,17 @@ func runAuth(flags *rootFlags, opts authOptions) (appPkg.SyncResult, error) {
 	ctx, stop := signalContextWithEvents(out.NewEventWriter(os.Stderr, flags.events))
 	defer stop()
 
+	// `auth --follow` keeps syncing with no delegate server, so for as long as it
+	// runs every delegated call fails ("store is locked but the socket does not
+	// answer") and the daemon's unit cannot start. On a pinned store that is
+	// refused: pair without --follow, then start the unit. The check runs before
+	// the exemption below sets isDaemon.
+	if opts.follow {
+		if storeDir, serr := resolveStoreDir(flags); serr == nil && flags.delegateOnlyFor(storeDir) {
+			return appPkg.SyncResult{}, fmt.Errorf("auth --follow is refused on a store pinned to the sync daemon: it would run as a daemon without the delegate socket; stop the unit (systemctl --user stop <wacli-sync unit>), pair without --follow, then start the unit")
+		}
+	}
+
 	// Pairing runs the full sync with the store handler, so what it receives is
 	// stored, and the lock keeps it off a store a daemon holds. A pinned store
 	// must stay re-pairable without touching the pin.
