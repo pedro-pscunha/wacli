@@ -224,6 +224,15 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					}
 				}
 			}
+			if lockHeld && !connect && !flags.isReadOnly() {
+				// The daemon knows whether its connection is up; the lock alone cannot say.
+				if resp, derr := delegateSend(ctx, flags, sendDelegateRequest{Kind: doctorKind}); derr == nil && len(resp.Data) > 0 {
+					var live doctorLive
+					if json.Unmarshal(resp.Data, &live) == nil {
+						authed, connected, linkedJID = live.Authed, live.Connected, live.LinkedJID
+					}
+				}
+			}
 			sessionRevoked, sessionStateErr := appPkg.SessionRevoked(storeDir)
 			if sessionStateErr != nil && storeErr == "" {
 				storeErr = sessionStateErr.Error()
