@@ -168,6 +168,16 @@ type App struct {
 	// liveSync is the running Sync's storage context, so work done on its
 	// connection (a live history backfill) stores messages as the sync does.
 	liveSync atomic.Pointer[liveSyncState]
+	// backfillTails holds, per chat, the cleanup of the last backfill runner that
+	// is still listening for late replies. A new runner for the same chat ends it
+	// first, so a late reply is never taken by two runners.
+	backfillTailMu sync.Mutex
+	backfillTails  map[string]*backfillTail
+}
+
+// backfillTail is one finished backfill runner still listening for late replies.
+type backfillTail struct {
+	end func()
 }
 
 // liveSyncState is what a request served by the sync daemon needs to store

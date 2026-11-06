@@ -557,3 +557,51 @@ func TestBackfillHistoryLiveRedeliveredMessagesAreNotAdded(t *testing.T) {
 		t.Fatalf("result = %+v, want synced 1 and added 0", res)
 	}
 }
+
+// m-i: after a backfill returns, its handler listens for late replies. A second
+// backfill of the same chat ends that tail first, so one reply is handled by one
+// runner: the blob is downloaded and stored once, and not twice.
+func TestSecondBackfillOfTheSameChatEndsTheFirstOnesTail(t *testing.T) {
+	a, f, chat, base := newBackfillRetryTest(t, "anchor")
+	f.mu.Lock()
+	f.connected = true
+	f.mu.Unlock()
+	syncType := waE2E.HistorySyncType_ON_DEMAND
+	notif := &waE2E.HistorySyncNotification{SyncType: &syncType}
+	answer := false
+	f.onDemandEvent = func(info types.MessageInfo, count int) any {
+		if !answer {
+			return nil // the first backfill gets no answer: its wait ends, the tail stays
+		}
+		return &events.Message{Message: &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{HistorySyncNotification: notif}}}
+	}
+	downloads := 0
+	f.downloadHistory = func(*waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+		downloads++
+		return backfillTestResponse(chat, "older-once", base.Add(-time.Second)).Data, nil
+	}
+
+	opts := backfillRetryOptions(chat)
+	opts.WaitPerRequest = 30 * time.Millisecond
+	// First backfill: no reply, so it fails after its wait. Its tail remains.
+	if _, err := a.BackfillHistoryLive(context.Background(), opts); err == nil {
+		t.Fatal("the first backfill should time out")
+	}
+	handlersBefore := func() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.handlers) }
+	if handlersBefore() == 0 {
+		t.Fatal("the first runner should still listen for a late reply")
+	}
+
+	// Second backfill, now answered: it must be the only listener.
+	answer = true
+	res, err := a.BackfillHistoryLive(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if downloads != 1 {
+		t.Fatalf("the reply was downloaded %d times, want once (a stale tail took it too)", downloads)
+	}
+	if res.MessagesSynced != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+}

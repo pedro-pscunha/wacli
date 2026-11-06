@@ -163,20 +163,35 @@ func (a *App) newBackfillRunner(ctx context.Context, opts BackfillOptions, chat 
 	})
 	// A reply can arrive after the last wait gave up. Keep the handler for one
 	// more wait period so that late blob is stored instead of dropped; the sync
-	// handler ignores ON_DEMAND blobs, so nothing else would store it.
+	// handler ignores ON_DEMAND blobs, so nothing else would store it. The tail
+	// is registered per chat, and a new runner for the same chat ends the old
+	// tail first: otherwise the old handler would take the new request's reply
+	// as its own and the blob would be stored, and its media queued, twice.
+	chatKey := a.canonicalStoreJID(ctx, chat).String()
+	a.endBackfillTail(chatKey)
+	var removeOnce sync.Once
+	removeHandler := func() { removeOnce.Do(func() { a.wa.RemoveEventHandler(handlerID) }) }
 	cleanup := func() {
 		tail := opts.WaitPerRequest
-		if tail <= 0 {
-			tail = 0
-		}
 		if tail > lateOnDemandGrace {
 			tail = lateOnDemandGrace
 		}
-		if tail == 0 {
-			a.wa.RemoveEventHandler(handlerID)
+		if tail <= 0 {
+			removeHandler()
 			return
 		}
-		time.AfterFunc(tail, func() { a.wa.RemoveEventHandler(handlerID) })
+		entry := &backfillTail{}
+		timer := time.AfterFunc(tail, func() {
+			removeHandler()
+			a.dropBackfillTail(chatKey, entry)
+		})
+		entry.end = func() { timer.Stop(); removeHandler() }
+		a.backfillTailMu.Lock()
+		if a.backfillTails == nil {
+			a.backfillTails = map[string]*backfillTail{}
+		}
+		a.backfillTails[chatKey] = entry
+		a.backfillTailMu.Unlock()
 	}
 
 	requestsSent := new(int)
@@ -335,6 +350,27 @@ func (a *App) newBackfillRunner(ctx context.Context, opts BackfillOptions, chat 
 			}
 			return nil
 		},
+	}
+}
+
+// endBackfillTail stops the late-reply listener of the previous backfill of chat.
+func (a *App) endBackfillTail(chatKey string) {
+	a.backfillTailMu.Lock()
+	old := a.backfillTails[chatKey]
+	delete(a.backfillTails, chatKey)
+	a.backfillTailMu.Unlock()
+	if old != nil {
+		old.end()
+	}
+}
+
+// dropBackfillTail forgets entry once its timer fired. It leaves a newer
+// runner's entry for the same chat alone.
+func (a *App) dropBackfillTail(chatKey string, entry *backfillTail) {
+	a.backfillTailMu.Lock()
+	defer a.backfillTailMu.Unlock()
+	if a.backfillTails[chatKey] == entry {
+		delete(a.backfillTails, chatKey)
 	}
 }
 
