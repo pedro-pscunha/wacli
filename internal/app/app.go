@@ -165,6 +165,18 @@ type App struct {
 	heartbeatLast             atomic.Int64
 	groupInfo                 groupInfoCache
 	presenceWatch             presenceWatch
+	// liveSync is the running Sync's storage context, so work done on its
+	// connection (a live history backfill) stores messages as the sync does.
+	liveSync atomic.Pointer[liveSyncState]
+}
+
+// liveSyncState is what a request served by the sync daemon needs to store
+// history the way the sync itself does: the daemon's options, its storage
+// limits and its media queue.
+type liveSyncState struct {
+	opts         SyncOptions
+	limits       *syncStorageLimits
+	enqueueMedia func(chatJID, msgID string)
 }
 
 func New(opts Options) (*App, error) {

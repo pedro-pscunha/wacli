@@ -443,3 +443,89 @@ func TestValidateBackfillRequest(t *testing.T) {
 		}
 	}
 }
+
+// The daemon case end to end: Sync(follow) is running with its event handler,
+// and a live backfill runs on its connection. The ON_DEMAND blob must be stored
+// exactly once, by the backfill (the sync handler skips ON_DEMAND), with the
+// daemon's options in effect, and the connection must never be redialed.
+func TestBackfillHistoryLiveInsideRunningSyncStoresOnDemandOnce(t *testing.T) {
+	a, f, chat, base := newBackfillRetryTest(t, "anchor")
+	syncType := waE2E.HistorySyncType_ON_DEMAND
+	notif := &waE2E.HistorySyncNotification{SyncType: &syncType}
+	f.onDemandEvent = func(info types.MessageInfo, count int) any {
+		return &events.Message{Message: &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{HistorySyncNotification: notif}}}
+	}
+	downloads := 0
+	f.downloadHistory = func(*waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+		downloads++
+		return backfillTestResponse(chat, "older-daemon", base.Add(-time.Second)).Data, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	type outcome struct {
+		res BackfillResult
+		err error
+	}
+	got := make(chan outcome, 1)
+	_, err := a.Sync(ctx, SyncOptions{
+		Mode:    SyncModeFollow,
+		AllowQR: false,
+		AfterConnect: func(ctx context.Context) error {
+			go func() {
+				res, err := a.BackfillHistoryLive(ctx, backfillRetryOptions(chat))
+				got <- outcome{res, err}
+				cancel()
+			}()
+			return nil
+		},
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sync: %v", err)
+	}
+	o := <-got
+	if o.err != nil {
+		t.Fatalf("BackfillHistoryLive: %v", o.err)
+	}
+	if downloads != 1 {
+		t.Fatalf("ON_DEMAND blob downloaded %d times, want once", downloads)
+	}
+	if len(f.deleteHistoryCalls) != 1 {
+		t.Fatalf("history blob deleted %d times, want once", len(f.deleteHistoryCalls))
+	}
+	if o.res.MessagesAdded != 1 {
+		t.Fatalf("MessagesAdded = %d, want exactly the one stored by this backfill", o.res.MessagesAdded)
+	}
+	if f.connectCalls != 1 {
+		t.Fatalf("connectCalls = %d, want 1 (the sync's own)", f.connectCalls)
+	}
+	n, err := a.db.CountMessages()
+	if err != nil || n != 2 {
+		t.Fatalf("stored messages = %d (err %v), want the anchor and one older", n, err)
+	}
+}
+
+// Live traffic stored during the run must not count as the repair's result.
+func TestBackfillHistoryLiveCountsOnlyItsOwnMessages(t *testing.T) {
+	a, f, chat, base := newBackfillRetryTest(t, "anchor")
+	f.mu.Lock()
+	f.connected = true
+	f.mu.Unlock()
+	syncType := waE2E.HistorySyncType_ON_DEMAND
+	notif := &waE2E.HistorySyncNotification{SyncType: &syncType}
+	f.onDemandEvent = func(info types.MessageInfo, count int) any {
+		// A live message lands in the store while the backfill waits.
+		_ = a.db.UpsertMessage(storeUpsertMessage(chat, "live-traffic", base.Add(time.Hour), "live"))
+		return &events.Message{Message: &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{HistorySyncNotification: notif}}}
+	}
+	f.downloadHistory = func(*waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+		return backfillTestResponse(chat, "older-x", base.Add(-time.Second)).Data, nil
+	}
+	res, err := a.BackfillHistoryLive(context.Background(), backfillRetryOptions(chat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.MessagesAdded != 1 {
+		t.Fatalf("MessagesAdded = %d, want 1 (the live message must not count)", res.MessagesAdded)
+	}
+}

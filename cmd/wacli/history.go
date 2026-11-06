@@ -152,8 +152,8 @@ func newHistoryBackfillCmd(flags *rootFlags) *cobra.Command {
 			if req <= 0 {
 				req = app.DefaultBackfillRequests
 			}
-			// Each request may wait twice (a retry after a timeout), plus the sync's own setup.
-			f := bulkTimeout(cmd, flags, time.Duration(req)*2*wait+5*time.Minute)
+			// A request can wait four times: the identity retry times the anchor retry. Plus the sync's own setup.
+			f := bulkTimeout(cmd, flags, time.Duration(req)*4*wait+5*time.Minute)
 
 			res, err := callKind[historyBackfillResult](ctx, f, sendDelegateRequest{
 				Kind: historyBackfillKind, Chat: chat, Count: count, Requests: requests,

@@ -25,6 +25,10 @@ type BackfillOptions struct {
 	IdleExit       time.Duration
 }
 
+// lateOnDemandGrace bounds how long a finished backfill keeps listening for a
+// reply that arrives after its wait ended.
+const lateOnDemandGrace = 60 * time.Second
+
 const (
 	DefaultBackfillCount    = 50
 	DefaultBackfillRequests = 1
@@ -118,7 +122,10 @@ func (a *App) newBackfillRunner(ctx context.Context, opts BackfillOptions, chat 
 			if notif == nil || notif.GetSyncType() != waE2E.HistorySyncType_ON_DEMAND {
 				return
 			}
-			data, err := a.wa.DownloadHistorySync(ctx, notif)
+			// A late reply still downloads after the request's context ended.
+			dlCtx, dlCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer dlCancel()
+			data, err := a.wa.DownloadHistorySync(dlCtx, notif)
 			if err != nil {
 				a.emitWarning(
 					"on_demand_history_download_failed",
@@ -131,11 +138,46 @@ func (a *App) newBackfillRunner(ctx context.Context, opts BackfillOptions, chat 
 				return
 			}
 			hs := &events.HistorySync{Data: data}
-			a.handleHistorySync(ctx, SyncOptions{}, hs, &manualMessagesStored, &manualLastEvent, func(string, string) {})
+			// Store as the running sync would: its options, storage limits and
+			// media queue. A reply that comes after the request ended is still
+			// stored, so the work is not lost; only the waiting stops.
+			syncOpts, limits, enqueue := SyncOptions{}, (*syncStorageLimits)(nil), func(string, string) {}
+			if live := a.liveSync.Load(); live != nil {
+				syncOpts, limits, enqueue = live.opts, live.limits, live.enqueueMedia
+			}
+			storeCtx := context.WithoutCancel(ctx)
+			if limits != nil {
+				a.handleHistorySync(storeCtx, syncOpts, hs, &manualMessagesStored, &manualLastEvent, enqueue, limits)
+			} else {
+				a.handleHistorySync(storeCtx, syncOpts, hs, &manualMessagesStored, &manualLastEvent, enqueue)
+			}
+			if err := a.wa.DeleteHistorySyncMedia(storeCtx, notif); err != nil {
+				a.emitWarning(
+					"history_delete_failed",
+					fmt.Sprintf("warning: failed to delete history sync media: %v", err),
+					map[string]any{"error": err.Error()},
+				)
+			}
 			handleOnDemand(hs)
 		}
 	})
-	cleanup := func() { a.wa.RemoveEventHandler(handlerID) }
+	// A reply can arrive after the last wait gave up. Keep the handler for one
+	// more wait period so that late blob is stored instead of dropped; the sync
+	// handler ignores ON_DEMAND blobs, so nothing else would store it.
+	cleanup := func() {
+		tail := opts.WaitPerRequest
+		if tail <= 0 {
+			tail = 0
+		}
+		if tail > lateOnDemandGrace {
+			tail = lateOnDemandGrace
+		}
+		if tail == 0 {
+			a.wa.RemoveEventHandler(handlerID)
+			return
+		}
+		time.AfterFunc(tail, func() { a.wa.RemoveEventHandler(handlerID) })
+	}
 
 	requestsSent := new(int)
 	responsesSeen := new(int)
@@ -343,19 +385,21 @@ func (a *App) BackfillHistoryLive(ctx context.Context, opts BackfillOptions) (Ba
 	if !a.wa.IsConnected() {
 		return BackfillResult{}, errors.New("not connected")
 	}
-	beforeCount, _ := a.db.CountMessages()
 	r := a.newBackfillRunner(ctx, opts, chat)
 	defer r.cleanup()
 	if err := r.run(ctx); err != nil {
 		return BackfillResult{}, err
 	}
-	afterCount, _ := a.db.CountMessages()
+	// Count only what this backfill stored. A whole-database difference would
+	// include live traffic stored during the run and could report a repair that
+	// did not happen.
+	stored := r.stored.Load()
 	return BackfillResult{
 		ChatJID:        a.canonicalStoreJID(ctx, chat).String(),
 		RequestsSent:   *r.requestsSent,
 		ResponsesSeen:  *r.responsesSeen,
-		MessagesAdded:  afterCount - beforeCount,
-		MessagesSynced: r.stored.Load(),
+		MessagesAdded:  stored,
+		MessagesSynced: stored,
 	}, nil
 }
 

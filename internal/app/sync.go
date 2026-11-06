@@ -176,6 +176,10 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 		defer stopWebhook()
 	}
 
+	live := &liveSyncState{opts: opts, limits: limits, enqueueMedia: enqueueMedia}
+	a.liveSync.Store(live)
+	defer a.liveSync.CompareAndSwap(live, nil)
+
 	ps := &syncPresence{}
 	handlerID, appStateRecoveries := a.addSyncEventHandler(syncCtx, opts, &messagesStored, &lastEvent, disconnected, loggedOut, staleReconnect, enqueueMedia, enqueueWebhook, limits, ps, mediaQ)
 	defer a.wa.RemoveEventHandler(handlerID)
