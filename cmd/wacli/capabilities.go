@@ -116,37 +116,23 @@ func newCapabilitiesCmd(flags *rootFlags) *cobra.Command {
 func newDevicesCmd(flags *rootFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "devices",
-		Short: "List the devices linked to this account (read-only)",
+		Short: "List the devices linked to this account (read-only, needs the sync daemon)",
 		Long: "List the primary phone and every companion device linked to this account.\n" +
 			"WhatsApp gives the device number; the platform and name are known for this\n" +
-			"device only, and there is no last-seen time. While `sync --follow` runs, the\n" +
-			"query uses its connection.",
+			"device only, and there is no last-seen time. It always asks the running\n" +
+			"`sync --follow`; it never opens a connection of its own, because a second\n" +
+			"connection acks messages it does not store.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			resp, err := delegateSend(ctx, flags, sendDelegateRequest{Kind: devicesKind})
 			if err != nil {
-				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{Kind: devicesKind})
-				if !delegated {
-					return err
+				if strings.Contains(err.Error(), errSendDelegateUnavailable.Error()) {
+					return fmt.Errorf("daemon not running: %w", err)
 				}
-				if delegateErr != nil {
-					return delegateErr
-				}
-				return writeDevices(flags, resp.Devices)
-			}
-			defer closeApp(a, lk)
-			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			list, err := a.WA().OwnDevices(ctx)
-			if err != nil {
-				return err
-			}
-			return writeDevices(flags, list)
+			return writeDevices(flags, resp.Devices)
 		},
 	}
 }

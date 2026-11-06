@@ -32,6 +32,9 @@ type AccountsConfig struct {
 type AccountEntry struct {
 	Store string `yaml:"store"`
 	Label string `yaml:"label,omitempty"`
+	// DelegateOnly makes every wacli command on this account's store refuse to
+	// connect outside the sync daemon, whatever flags or environment it has.
+	DelegateOnly bool `yaml:"delegate_only,omitempty"`
 }
 
 type Account struct {
@@ -257,4 +260,35 @@ func defaultStoreDirFor(goos, home, xdgStateHome string, exists func(string) boo
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// DelegateOnlyMarker is the file name that marks a store delegate-only.
+const DelegateOnlyMarker = ".delegate-only"
+
+// StoreIsDelegateOnly reports whether storeDir is pinned to the sync daemon:
+// it holds a DelegateOnlyMarker file, or the account config marks the account
+// that owns it with delegate_only. A missing or unreadable config is not an
+// error here: the marker still applies.
+func StoreIsDelegateOnly(storeDir, configPath string) bool {
+	if info, err := os.Stat(filepath.Join(storeDir, DelegateOnlyMarker)); err == nil && !info.IsDir() {
+		return true
+	}
+	cfg, found, err := LoadAccountsConfigIfExists(configPath)
+	if err != nil || !found {
+		return false
+	}
+	want, _ := filepath.Abs(storeDir)
+	for name, entry := range cfg.Accounts {
+		if !entry.DelegateOnly {
+			continue
+		}
+		resolved, _, err := ResolveAccountStore(configPath, name)
+		if err != nil {
+			continue
+		}
+		if got, _ := filepath.Abs(resolved); got == want {
+			return true
+		}
+	}
+	return false
 }

@@ -134,6 +134,18 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed 
 		return nil, nil, err
 	}
 
+	delegateOnly := flags.delegateOnlyFor(storeDir)
+	if needLock && delegateOnly {
+		// Decide from the daemon's socket, before the lock or wacli.db are
+		// touched: a refused call must not hold either, or it can block the
+		// daemon's own restart. A listening daemon means the store is in use,
+		// and the caller delegates; nothing listening means refuse.
+		if !sendDelegateAvailable(ctx, storeDir) {
+			return nil, nil, app.ErrDelegateOnly
+		}
+		return nil, nil, fmt.Errorf("%w: the sync daemon serves this store (--delegate-only)", lock.ErrLocked)
+	}
+
 	var lk *lock.Lock
 	if needLock {
 		lk, err = lock.AcquireWithTimeout(ctx, storeDir, flags.lockWait)
@@ -149,7 +161,7 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed 
 		Events:        out.NewEventWriter(os.Stderr, flags.events),
 		AllowUnauthed: allowUnauthed,
 		ReadOnly:      flags.isReadOnly(),
-		DelegateOnly:  flags.isDelegateOnly(),
+		DelegateOnly:  delegateOnly,
 	})
 	if err != nil {
 		if lk != nil {
@@ -238,6 +250,19 @@ func (f *rootFlags) isDelegateOnly() bool {
 	default:
 		return false
 	}
+}
+
+// delegateOnlyFor reports whether this call is delegate-only for storeDir: the
+// flag, the environment variable, or a per-store marker or account setting that
+// no caller can forget. The sync daemon itself is never delegate-only.
+func (f *rootFlags) delegateOnlyFor(storeDir string) bool {
+	if f != nil && f.isDaemon {
+		return false
+	}
+	if f.isDelegateOnly() {
+		return true
+	}
+	return config.StoreIsDelegateOnly(storeDir, config.DefaultConfigPath())
 }
 
 func (f *rootFlags) requireWritable() error {

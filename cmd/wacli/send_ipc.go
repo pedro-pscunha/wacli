@@ -206,6 +206,20 @@ func delegateSend(ctx context.Context, flags *rootFlags, req sendDelegateRequest
 	return resp, nil
 }
 
+// sendDelegateAvailable reports whether a daemon accepts connections on the
+// store's delegate socket. It dials and hangs up: no lock, no database.
+func sendDelegateAvailable(ctx context.Context, storeDir string) bool {
+	var d net.Dialer
+	dctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	conn, err := d.DialContext(dctx, "unix", sendDelegateSocketPath(storeDir))
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 func tryDelegateSend(ctx context.Context, flags *rootFlags, lockErr error, req sendDelegateRequest) (sendDelegateResponse, bool, error) {
 	if !lock.IsLocked(lockErr) {
 		return sendDelegateResponse{}, false, lockErr

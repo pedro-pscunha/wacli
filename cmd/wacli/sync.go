@@ -70,8 +70,10 @@ func newSyncCmd(flags *rootFlags) *cobra.Command {
 
 			// Only follow mode is the daemon, the one process allowed to connect.
 			flags.isDaemon = !once && follow
-			if !flags.isDaemon && flags.isDelegateOnly() {
-				return fmt.Errorf("sync --once connects to WhatsApp: %w", appPkg.ErrDelegateOnly)
+			if !flags.isDaemon {
+				if storeDir, err := resolveStoreDir(flags); err == nil && flags.delegateOnlyFor(storeDir) {
+					return fmt.Errorf("sync --once connects to WhatsApp: %w", appPkg.ErrDelegateOnly)
+				}
 			}
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {

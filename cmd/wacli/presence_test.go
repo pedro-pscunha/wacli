@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -443,18 +444,27 @@ func startPresenceDelegateTestSocket(t *testing.T, storeDir string, respond func
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
+		var conn net.Conn
+		var req sendDelegateRequest
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+			// A bare dial-and-hang-up is the availability probe: not a request.
+			if err := json.NewDecoder(c).Decode(&req); err != nil {
+				_ = c.Close()
+				if errors.Is(err, io.EOF) {
+					continue
+				}
+				requests <- presenceDelegateTestRequest{err: err}
+				return
+			}
+			conn = c
+			break
 		}
 		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-		var req sendDelegateRequest
-		if err := json.NewDecoder(conn).Decode(&req); err != nil {
-			requests <- presenceDelegateTestRequest{err: err}
-			return
-		}
 		requests <- presenceDelegateTestRequest{req: req}
 		_ = json.NewEncoder(conn).Encode(respond(req))
 	}()

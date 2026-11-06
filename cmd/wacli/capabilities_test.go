@@ -114,13 +114,6 @@ func TestCapabilitiesWithoutDaemonFailsAndNeverConnects(t *testing.T) {
 	}
 }
 
-func TestDevicesRefusedWithoutDaemonWhenDelegateOnly(t *testing.T) {
-	err := execute([]string{"--store", t.TempDir(), "--delegate-only", "devices"})
-	if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
 func TestReadOnlyKindsSkipTheSendQueue(t *testing.T) {
 	if !isReadOnlyDelegateKind(capabilitiesKind) || !isReadOnlyDelegateKind(devicesKind) || isReadOnlyDelegateKind("text") {
 		t.Fatal("read-only kind set is wrong")
