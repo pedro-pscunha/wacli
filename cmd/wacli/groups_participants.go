@@ -7,9 +7,7 @@ import (
 	"strings"
 
 	"github.com/openclaw/wacli/internal/out"
-	"github.com/openclaw/wacli/internal/wa"
 	"github.com/spf13/cobra"
-	"go.mau.fi/whatsmeow/types"
 )
 
 func newGroupsParticipantsCmd(flags *rootFlags) *cobra.Command {
@@ -88,40 +86,11 @@ func newGroupsParticipantsActionCmd(flags *rootFlags, action string) *cobra.Comm
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[groupParticipantsResult](ctx, flags, sendDelegateRequest{Kind: groupParticipantsKind, GroupJID: group, Users: users, SubAction: action})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			gjid, err := types.ParseJID(group)
-			if err != nil {
-				return err
-			}
-			var jids []types.JID
-			for _, u := range users {
-				j, err := wa.ParseUserOrJID(u)
-				if err != nil {
-					return err
-				}
-				jids = append(jids, j)
-			}
-
-			updated, err := a.WA().UpdateGroupParticipants(ctx, gjid, jids, wa.GroupParticipantAction(action))
-			if err != nil {
-				return err
-			}
-			if info, err := a.WA().GetGroupInfo(ctx, gjid); err == nil && info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			updated := res.Updated
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, updated)

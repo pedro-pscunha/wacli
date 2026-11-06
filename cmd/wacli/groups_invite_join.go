@@ -41,27 +41,12 @@ func newGroupsInviteLinkGetCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[groupAckResult](ctx, flags, sendDelegateRequest{Kind: groupInviteKind, GroupJID: jidStr, SubAction: "get"})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			gjid, err := types.ParseJID(jidStr)
-			if err != nil {
-				return err
-			}
-			link, err := a.WA().GetGroupInviteLink(ctx, gjid, false)
-			if err != nil {
-				return err
-			}
+			gjid, _ := parseGroupJID(jidStr)
+			link := res.Link
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"jid": gjid.String(), "link": link})
 			}
@@ -87,27 +72,12 @@ func newGroupsInviteLinkRevokeCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[groupAckResult](ctx, flags, sendDelegateRequest{Kind: groupInviteKind, GroupJID: jidStr, SubAction: "revoke"})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			gjid, err := types.ParseJID(jidStr)
-			if err != nil {
-				return err
-			}
-			link, err := a.WA().GetGroupInviteLink(ctx, gjid, true)
-			if err != nil {
-				return err
-			}
+			gjid, _ := parseGroupJID(jidStr)
+			link := res.Link
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"jid": gjid.String(), "link": link, "revoked": true})
 			}
@@ -133,26 +103,11 @@ func newGroupsJoinCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[groupAckResult](ctx, flags, sendDelegateRequest{Kind: groupJoinKind, Code: code})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			jid, err := a.WA().JoinGroupWithLink(ctx, code)
-			if err != nil {
-				return err
-			}
-			if info, err := a.WA().GetGroupInfo(ctx, jid); err == nil && info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			jid, _ := types.ParseJID(res.JID)
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"jid": jid.String(), "joined": true})
 			}

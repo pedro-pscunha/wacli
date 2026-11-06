@@ -37,46 +37,14 @@ func newGroupsCreateCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			participants, err := parseGroupUserJIDs(users)
-			if err != nil {
-				return err
-			}
-			var parentJID types.JID
-			if strings.TrimSpace(linkedParent) != "" {
-				parentJID, err = parseGroupJID(linkedParent)
-				if err != nil {
-					return fmt.Errorf("parse --linked-parent: %w", err)
-				}
-			}
-			info, err := a.WA().CreateGroup(ctx, wa.CreateGroupRequest{
-				Name:                   name,
-				Participants:           participants,
-				IsAnnounce:             announceOnly,
-				IsLocked:               locked,
-				IsJoinApprovalRequired: joinApproval,
-				IsParent:               parent,
-				LinkedParentJID:        parentJID,
+			res, err := callKind[groupInfoResult](ctx, flags, sendDelegateRequest{
+				Kind: groupCreateKind, Name: name, Users: users, Announce: announceOnly, Locked: locked,
+				JoinApproval: joinApproval, Parent: parent, LinkedParent: linkedParent,
 			})
 			if err != nil {
 				return err
 			}
-			if info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			info := res.Info
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, info)
@@ -114,29 +82,10 @@ func newGroupsTopicCmd(flags *rootFlags, use string) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
+			if _, err := callKind[groupAckResult](ctx, flags, sendDelegateRequest{Kind: groupTopicKind, GroupJID: jidStr, Topic: &text}); err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			gjid, err := parseGroupJID(jidStr)
-			if err != nil {
-				return err
-			}
-			if err := a.WA().SetGroupTopic(ctx, gjid, text); err != nil {
-				return err
-			}
-			if info, err := a.WA().GetGroupInfo(ctx, gjid); err == nil && info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			gjid, _ := parseGroupJID(jidStr)
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"jid": gjid.String(), "topic": text})
 			}
@@ -181,29 +130,10 @@ func newGroupsToggleCmd(flags *rootFlags, use, short string, apply func(context.
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
+			if _, err := callKind[groupAckResult](ctx, flags, sendDelegateRequest{Kind: groupSettingKind, GroupJID: jidStr, SubAction: use, Enable: &enabled}); err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			gjid, err := parseGroupJID(jidStr)
-			if err != nil {
-				return err
-			}
-			if err := apply(ctx, a.WA(), gjid, enabled); err != nil {
-				return err
-			}
-			if info, err := a.WA().GetGroupInfo(ctx, gjid); err == nil && info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			gjid, _ := parseGroupJID(jidStr)
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"jid": gjid.String(), jsonKey: enabled})
 			}
@@ -265,29 +195,11 @@ func newGroupsRequestsListCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[groupRequestsListResult](ctx, flags, sendDelegateRequest{Kind: groupRequestsListKind, GroupJID: jidStr})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			gjid, err := parseGroupJID(jidStr)
-			if err != nil {
-				return err
-			}
-			requests, err := a.WA().GetGroupRequestParticipants(ctx, gjid)
-			if err != nil {
-				return err
-			}
-
-			entries := resolveRequestEntries(ctx, requests, a.WA().ResolveLIDToPN)
+			entries := res.Entries
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, entries)
@@ -317,34 +229,11 @@ func newGroupsRequestsActionCmd(flags *rootFlags, action string) *cobra.Command 
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[groupParticipantsResult](ctx, flags, sendDelegateRequest{Kind: groupRequestsKind, GroupJID: jidStr, Users: users, SubAction: action})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			gjid, err := parseGroupJID(jidStr)
-			if err != nil {
-				return err
-			}
-			jids, err := parseGroupUserJIDs(users)
-			if err != nil {
-				return err
-			}
-			updated, err := a.WA().UpdateGroupRequestParticipants(ctx, gjid, jids, wa.GroupParticipantRequestAction(action))
-			if err != nil {
-				return err
-			}
-			if info, err := a.WA().GetGroupInfo(ctx, gjid); err == nil && info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			updated := res.Updated
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, updated)

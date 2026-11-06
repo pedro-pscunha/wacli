@@ -9,7 +9,6 @@ import (
 
 	"github.com/openclaw/wacli/internal/out"
 	"github.com/spf13/cobra"
-	"go.mau.fi/whatsmeow/types"
 )
 
 func newGroupsInfoCmd(flags *rootFlags) *cobra.Command {
@@ -26,34 +25,11 @@ func newGroupsInfoCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
+			res, err := callKind[groupInfoResult](ctx, flags, sendDelegateRequest{Kind: groupInfoKind, GroupJID: jidStr})
 			if err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			gjid, err := types.ParseJID(jidStr)
-			if err != nil {
-				return err
-			}
-			info, err := a.WA().GetGroupInfo(ctx, gjid)
-			if err != nil {
-				return err
-			}
-			if info == nil {
-				return fmt.Errorf("group info not found for %s", gjid.String())
-			}
-			if info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			info := res.Info
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, info)
@@ -94,30 +70,10 @@ func newGroupsRenameCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
+			if _, err := callKind[groupAckResult](ctx, flags, sendDelegateRequest{Kind: groupRenameKind, GroupJID: jidStr, Name: name}); err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			gjid, err := types.ParseJID(jidStr)
-			if err != nil {
-				return err
-			}
-			if err := a.WA().SetGroupName(ctx, gjid, name); err != nil {
-				return err
-			}
-			if info, err := a.WA().GetGroupInfo(ctx, gjid); err == nil && info != nil {
-				_ = persistGroupInfo(ctx, a.DB(), a.WA(), info)
-			}
+			gjid, _ := parseGroupJID(jidStr)
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"jid": gjid.String(), "name": name})
 			}
@@ -144,27 +100,10 @@ func newGroupsLeaveCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
+			if _, err := callKind[groupAckResult](ctx, flags, sendDelegateRequest{Kind: groupLeaveKind, GroupJID: jidStr}); err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			gjid, err := types.ParseJID(jidStr)
-			if err != nil {
-				return err
-			}
-			if err := a.WA().LeaveGroup(ctx, gjid); err != nil {
-				return err
-			}
-			_ = a.DB().MarkGroupLeft(gjid.String(), time.Now().UTC())
+			gjid, _ := parseGroupJID(jidStr)
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{"jid": gjid.String(), "left": true})
 			}
