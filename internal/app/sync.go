@@ -86,6 +86,13 @@ type SyncResult struct {
 }
 
 func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
+	// Sync dials the connection itself, not through Connect. A delegate-only app
+	// belongs to a command that must not hold a session of its own (auth login,
+	// sync --once, a one-shot backfill); only the sync daemon's app is built
+	// without the flag.
+	if a.opts.DelegateOnly {
+		return SyncResult{}, ErrDelegateOnly
+	}
 	status := a.beginSyncStatus()
 	defer a.endSyncStatus(status)
 
