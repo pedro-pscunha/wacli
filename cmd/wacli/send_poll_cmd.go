@@ -89,11 +89,13 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
-			if newMsgID != "" {
-				if done, err := localAlreadySent(ctx, flags, a, "poll", to, newMsgID); err != nil || done {
-					return err
-				}
+			ctx, finishID, idDone, idErr := localIDGuard(ctx, flags, a, "poll", to, question, newMsgID)
+			if idDone {
+				return idErr
 			}
+			var sendErr error
+			var sendStoreWarning string
+			defer func() { finishID(sendErr, sendStoreWarning) }()
 			toJID, err := resolveRecipient(a, to, recipientOptions{pick: pick, asJSON: flags.asJSON})
 			if err != nil {
 				return err
@@ -109,11 +111,15 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
 			msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
 				return sendPollMessage(ctx, a.WA(), toJID, question, cleaned, multi, ephemeral)
 			})
+			sendErr = err
 			if err != nil {
 				return err
 			}
 
 			storeErr := persistOutboundPoll(ctx, a, toJID, string(msgID), question, cleaned, uint32(multi), time.Now().UTC())
+			if storeErr != nil {
+				sendStoreWarning = storeErr.Error()
+			}
 			warnSendStoreFailure(os.Stderr, string(msgID), storeErr)
 			waitForPostSendRetryReceipts(ctx, postSendWait)
 

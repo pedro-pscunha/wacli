@@ -32,6 +32,7 @@ wacli sync [--once] [--follow] [--idle-exit 30s] [--max-reconnect 5m] [--stale-t
   - Exempt: `sync --follow`, and `auth` login, which runs the full sync with the store handler (so a pinned store is re-paired with the marker in place); the store lock keeps both off a store a running daemon holds. Refused: `sync --once`, `auth logout`, `doctor --connect`, and every send, group, profile, channel, label and backfill command without a daemon.
   - Local maintenance (`store cleanup`, `messages purge`, `chats cleanup`, `groups prune`, `contacts ...`) never connects: with the daemon down it takes the lock as usual, with the daemon running it asks you to stop the daemon.
   - The check dials the daemon's socket first and, with none listening, refuses before it takes the store lock or opens `wacli.db`, so a refused retry cannot block the daemon's restart.
+  - `auth --follow` is refused on a pinned store: it would act as a daemon with no delegate socket, so every delegated call would fail while it runs. Stop the unit (`systemctl --user stop <wacli-sync unit>`), pair without `--follow`, then start the unit.
   - To lift the pin for a one-off repair, remove the file with the daemon stopped.
   - Health check for "every store is pinned": `for d in <every store dir>; do test -f "$d/.delegate-only" || echo "UNPINNED $d"; done`, plus `wacli capabilities --json | jq -e '.features | index("store_pin")'` against the running binary of each daemon.
 - `wacli devices` and `wacli capabilities` always ask the running daemon and never connect.
@@ -127,3 +128,27 @@ wacli sync --follow --stale-threshold 2m --events 2>events.ndjson
 wacli sync --follow --webhook https://example.com/wacli --webhook-secret "$WACLI_WEBHOOK_SECRET"
 wacli sync --follow --webhook https://example.com/wacli --webhook-events message,receipt,chat_presence
 ```
+
+### `--id`: retries, `already_sent` and `resultado_incerto`
+
+A send with `--id <msgid>` (`--new-id` on react, select, edit and poll vote) is safe to retry, within these rules.
+
+**One id per message: one action sent to one recipient.** A fan-out to several chats needs one id per chat. An id derived from a template or a rule must include the run. Two callers on one account (Hermes and Dona on `pedro_cunha`) must not share an id scheme.
+
+What a retry answers:
+
+| Situation | Answer | Process exit |
+|---|---|---|
+| The same message (same kind and text) is stored | `already_sent: true`, `to` = the chat it was stored under, nothing sent | 0 |
+| Same, and the typed recipient differs from the first attempt's | the above plus `target_mismatch` | 0 |
+| The id names a different message (other kind or text) | error `id_reused`, nothing sent | 1 |
+| An earlier attempt went out but the local store write failed | `already_sent: true` (the row says `sent`) | 0 |
+| An earlier attempt started and its result is unknown | `resultado_incerto`: `outcome_unknown: true`, `code`, `id`, nothing sent | 75 |
+
+`resultado_incerto` means the ack wait was cut after the frame went out (or the websocket dropped after it). The local store cannot show that message, because it was never stored. **Check on the phone.** If the message is there, nothing more is needed. If it is not, send again with a **new** `--id`. Do not loop on the old id: it keeps answering the same until the row is released.
+
+A failure before the frame goes out (no connection, validation) and the server's own error reply are definite: they release the id, and the same retry sends at once. The decision is made by phase, not by the text of the error.
+
+`wacli pending-sends list` shows the recorded sends. `wacli pending-sends clear --id <id>` releases one id that is blocked wrongly, for example after a daemon crash mid-send when you have confirmed on the phone that the message never left. Rows older than 7 days stop blocking by themselves. Both commands are local maintenance: they take the store lock, so stop the daemon first on a pinned store.
+
+The sync daemon applies the same rules to every kind that stores a sent message: text, file, voice, sticker, location, poll, react and forward. The commands that send on their own connection (a store with no daemon and no pin) write the same rows.

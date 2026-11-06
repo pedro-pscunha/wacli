@@ -100,11 +100,13 @@ func newSendLocationCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
-			if newMsgID != "" {
-				if done, err := localAlreadySent(ctx, flags, a, "location", to, newMsgID); err != nil || done {
-					return err
-				}
+			ctx, finishID, idDone, idErr := localIDGuard(ctx, flags, a, "location", to, "", newMsgID)
+			if idDone {
+				return idErr
 			}
+			var sendErr error
+			var sendStoreWarning string
+			defer func() { finishID(sendErr, sendStoreWarning) }()
 			toJID, err := resolveRecipient(a, to, recipientOptions{pick: pick, asJSON: flags.asJSON})
 			if err != nil {
 				return err
@@ -120,11 +122,15 @@ func newSendLocationCmd(flags *rootFlags) *cobra.Command {
 			msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
 				return sendLocationMessage(ctx, a.WA(), toJID, opts)
 			})
+			sendErr = err
 			if err != nil {
 				return err
 			}
 
 			storeErr := persistOutboundLocation(ctx, a, toJID, string(msgID), opts, time.Now().UTC())
+			if storeErr != nil {
+				sendStoreWarning = storeErr.Error()
+			}
 			warnSendStoreFailure(os.Stderr, string(msgID), storeErr)
 
 			waitForPostSendRetryReceipts(ctx, postSendWait)

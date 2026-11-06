@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/openclaw/wacli/internal/app"
+	"github.com/openclaw/wacli/internal/wa"
 )
 
 // A registered kind is a command that must run on the daemon's connection when
@@ -169,15 +170,20 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 		applySendMeta(&cached, resp)
 		return cached, nil
 	}
-	finish, early, err := beginIDSend(a, req)
+	ctx, phase := wa.WithSendPhase(ctx)
+	finish, early, err := beginIDSend(a, req, phase)
 	if err != nil {
 		return zero, err
 	}
 	if early != nil {
-		return zero, errors.New(early.Error)
+		return zero, &outcomeUnknownError{resp: *early}
 	}
 	res, err := h.run(ctx, a, req)
-	finish(err)
+	warn, chat := "", ""
+	if r, ok := res.(interface{ storeWarning() (string, string) }); ok {
+		warn, chat = r.storeWarning()
+	}
+	finish(err, warn, chat)
 	if err != nil {
 		return zero, err
 	}

@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/openclaw/wacli/internal/lock"
 	"github.com/openclaw/wacli/internal/store"
+	"github.com/openclaw/wacli/internal/wa"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -49,7 +54,7 @@ func TestNewIDHitInAnotherChatIsAlreadySentWithWarning(t *testing.T) {
 	if err := a.DB().UpsertChat("5511888888888@s.whatsapp.net", "dm", "other", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.DB().UpsertMessage(store.UpsertMessageParams{ChatJID: "5511888888888@s.whatsapp.net", MsgID: retryID, Timestamp: time.Now(), FromMe: true, Text: "old"}); err != nil {
+	if err := a.DB().UpsertMessage(store.UpsertMessageParams{ChatJID: "5511888888888@s.whatsapp.net", MsgID: retryID, Timestamp: time.Now(), FromMe: true, Text: "hi"}); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := executeDelegatedSend(context.Background(), a, sendTextRequest("5511999999999@s.whatsapp.net"))
@@ -87,8 +92,10 @@ func TestNewIDRetryAfterBrazilianNinthDigitRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if !second.AlreadySent || second.To != "551187654321@s.whatsapp.net" || second.TargetMismatch == "" {
-		t.Fatalf("retry = %+v, want already_sent to the stored chat with a target_mismatch warning", second)
+	// The same typed number again is a plain retry: no warning. The warning is
+	// for a different typed recipient (TestTargetMismatchOnlyWhenTheTypedRecipientDiffers).
+	if !second.AlreadySent || second.To != "551187654321@s.whatsapp.net" || second.TargetMismatch != "" {
+		t.Fatalf("retry = %+v, want already_sent to the stored chat and no warning", second)
 	}
 	if len(f.sendTexts) != 1 {
 		t.Fatalf("the text went out %d times", len(f.sendTexts))
@@ -154,6 +161,7 @@ func TestUnknownOutcomeBlocksARetryWithResultadoIncerto(t *testing.T) {
 func TestCleanFailureDoesNotBlockTheRetry(t *testing.T) {
 	f := newDaemonFakeWA()
 	f.sendTextErrs = []error{errors.New("not connected")}
+	f.errBeforeWire = true
 	a := newDaemonApp(t, f)
 	to := "5511999999999@s.whatsapp.net"
 	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to)); err == nil {
@@ -168,14 +176,293 @@ func TestCleanFailureDoesNotBlockTheRetry(t *testing.T) {
 	}
 }
 
-// A success leaves no pending row behind: the stored message is the proof.
-func TestSuccessfulSendClearsThePendingRow(t *testing.T) {
+// A success leaves only a "done" record (the typed recipient), which never blocks
+// a new attempt: the stored message is the proof, and it answers first.
+func TestSuccessfulSendLeavesOnlyANonBlockingRecord(t *testing.T) {
 	f := newDaemonFakeWA()
 	a := newDaemonApp(t, f)
 	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest("5511999999999@s.whatsapp.net")); err != nil {
 		t.Fatal(err)
 	}
-	if _, inserted, _ := a.DB().BeginPendingSend(retryID, "x"); !inserted {
-		t.Fatal("a pending row survived a successful send")
+	ps, ok, err := a.DB().GetPendingSend(retryID)
+	if err != nil || !ok || ps.State != store.PendingSendDone {
+		t.Fatalf("record = %+v ok=%v err=%v, want a done record", ps, ok, err)
+	}
+}
+
+// ---- review round 3: m-1, m-2, m-3 -------------------------------------------
+
+func textRequestWith(to, message string) sendDelegateRequest {
+	r := sendTextRequest(to)
+	r.Message = message
+	return r
+}
+
+// m-1: classification is by phase. After the dispatch mark, a dropped websocket
+// is unknown; the server's own error reply is definite.
+func TestPhaseClassificationAfterDispatch(t *testing.T) {
+	if !wa.ErrorAfterDispatchIsUnknown(&whatsmeow.DisconnectedError{Action: "message send"}) {
+		t.Error("a websocket that dropped before the send returned must be unknown")
+	}
+	if !wa.ErrorAfterDispatchIsUnknown(whatsmeow.ErrNotConnected) {
+		t.Error("ErrNotConnected after the frame was written must be unknown")
+	}
+	if !wa.ErrorAfterDispatchIsUnknown(context.DeadlineExceeded) {
+		t.Error("a timeout after dispatch must be unknown")
+	}
+	if wa.ErrorAfterDispatchIsUnknown(fmt.Errorf("%w 479", whatsmeow.ErrServerReturnedError)) {
+		t.Error("the server's own error reply is definite")
+	}
+	if wa.ErrorAfterDispatchIsUnknown(nil) {
+		t.Error("no error is not unknown")
+	}
+}
+
+// A dropped websocket after the frame went out keeps the row, with no text in
+// the error that the old classifier could match.
+func TestDroppedWebsocketAfterDispatchBlocksTheRetry(t *testing.T) {
+	f := newDaemonFakeWA()
+	f.sendTextErrs = []error{&whatsmeow.DisconnectedError{Action: "message send"}}
+	a := newDaemonApp(t, f)
+	to := "5511999999999@s.whatsapp.net"
+	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to)); err == nil {
+		t.Fatal("the first attempt should fail")
+	}
+	_, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to))
+	var unknown *outcomeUnknownError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("retry err = %v, want resultado_incerto", err)
+	}
+	if len(f.sendTexts) != 0 {
+		t.Fatalf("the retry went on the wire: %v", f.sendTexts)
+	}
+}
+
+// A failure before the wire that merely mentions a timeout is definite: the
+// phase, not the text, decides. The old classifier locked this id for a week.
+func TestErrorBeforeDispatchMentioningTimeoutIsDefinite(t *testing.T) {
+	f := newDaemonFakeWA()
+	// "info query timed out" is retryable, so the send is tried twice: two failures.
+	f.sendTextErrs = []error{
+		errors.New("info query timed out; reconnect failed: daemon not connected, not sent"),
+		errors.New("info query timed out; reconnect failed: daemon not connected, not sent"),
+	}
+	f.errBeforeWire = true
+	a := newDaemonApp(t, f)
+	to := "5511999999999@s.whatsapp.net"
+	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to)); err == nil {
+		t.Fatal("the first attempt should fail")
+	}
+	resp, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to))
+	if err != nil || !resp.Sent || resp.AlreadySent {
+		t.Fatalf("retry = %+v err=%v, want a plain send", resp, err)
+	}
+}
+
+// The server's own error reply after dispatch is a definite failure.
+func TestServerErrorAfterDispatchIsDefinite(t *testing.T) {
+	f := newDaemonFakeWA()
+	f.sendTextErrs = []error{fmt.Errorf("%w 479", whatsmeow.ErrServerReturnedError)}
+	a := newDaemonApp(t, f)
+	to := "5511999999999@s.whatsapp.net"
+	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to)); err == nil {
+		t.Fatal("the first attempt should fail")
+	}
+	if resp, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to)); err != nil || resp.AlreadySent {
+		t.Fatalf("retry = %+v err=%v", resp, err)
+	}
+}
+
+// m-1: a send that went out but whose store write failed keeps a "sent" row; the
+// retry answers already_sent, never a second send.
+func TestStoreWarningKeepsASentRowAndTheRetryIsAlreadySent(t *testing.T) {
+	f := newDaemonFakeWA()
+	a := newDaemonApp(t, f)
+	to := "5511999999999@s.whatsapp.net"
+	ctx, phase := wa.WithSendPhase(context.Background())
+	finish, early, err := beginIDSend(a, textRequestWith(to, "hi"), phase)
+	if err != nil || early != nil {
+		t.Fatalf("begin: %v %v", err, early)
+	}
+	wa.MarkDispatched(ctx)
+	finish(nil, "message update: disk full", "551187654321@s.whatsapp.net") // sent, store failed
+
+	resp, err := executeDelegatedSend(context.Background(), a, textRequestWith(to, "hi"))
+	if err != nil || !resp.AlreadySent || resp.To != "551187654321@s.whatsapp.net" {
+		t.Fatalf("retry = %+v err=%v, want already_sent to the stored chat", resp, err)
+	}
+	if len(f.sendTexts) != 0 {
+		t.Fatalf("the retry went on the wire: %v", f.sendTexts)
+	}
+}
+
+// m-2: OutcomeUnknown and the id cross the socket and become a typed error.
+func TestOutcomeUnknownCrossesTheSocketAndHasItsOwnExitCode(t *testing.T) {
+	f := newDaemonFakeWA()
+	f.sendTextErrs = []error{&whatsmeow.DisconnectedError{Action: "message send"}}
+	fx := newDaemonFixture(t, f)
+	req := sendTextRequest("5511999999999@s.whatsapp.net")
+	if first := fx.call(t, req); first.OK {
+		t.Fatalf("the first attempt should fail: %+v", first)
+	}
+	second := fx.call(t, req)
+	if second.OK || !second.OutcomeUnknown || second.ID != retryID || !strings.Contains(second.Error, outcomeUnknownCode) {
+		t.Fatalf("second over the socket = %+v, want the typed resultado_incerto answer", second)
+	}
+	if !strings.Contains(second.Error, "confira no celular") || !strings.Contains(second.Error, "--id novo") {
+		t.Fatalf("advice = %q", second.Error)
+	}
+	err := error(&outcomeUnknownError{resp: second})
+	if exitCodeFor(err) != exitCodeOutcomeUnknown || exitCodeFor(errors.New("x")) != 1 {
+		t.Fatalf("exit codes: %d %d", exitCodeFor(err), exitCodeFor(errors.New("x")))
+	}
+}
+
+func TestOutcomeUnknownCLIPrintsTheTypedFields(t *testing.T) {
+	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
+	storeDir := shortPresenceDelegateStoreDir(t)
+	lk, err := lock.Acquire(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Release()
+	server := startPresenceDelegateTestSocket(t, storeDir, func(sendDelegateRequest) sendDelegateResponse {
+		return sendDelegateResponse{OK: false, OutcomeUnknown: true, ID: retryID, Error: outcomeUnknownCode + ": " + outcomeUnknownAdvice(retryID)}
+	})
+	defer server.stop()
+	_, stderr, runErr := runPresenceDelegateHelper(t, []string{"--store", storeDir, "--json", "--timeout", "750ms", "send", "text", "--to", "+15551234567", "--message", "hi", "--id", retryID})
+	if runErr == nil {
+		t.Fatal("resultado_incerto must be a failure")
+	}
+	for _, want := range []string{`"outcome_unknown":true`, `"code":"resultado_incerto"`, `"id":"` + retryID + `"`} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %s: %q", want, stderr)
+		}
+	}
+	var ee *exec.ExitError
+	if errors.As(runErr, &ee) && ee.ExitCode() != exitCodeOutcomeUnknown {
+		t.Errorf("exit code = %d, want %d", ee.ExitCode(), exitCodeOutcomeUnknown)
+	}
+}
+
+// m-2: `pending-sends clear` releases a wrongly blocked id.
+func TestPendingSendsClearReleasesAnId(t *testing.T) {
+	isolateAccountConfigHome(t)
+	t.Setenv("WACLI_DELEGATE_ONLY", "")
+	store := t.TempDir()
+	f := newDaemonFakeWA()
+	a := newDaemonAppAt(t, f, store)
+	if _, ins, err := a.DB().BeginPendingSend(storeRow(retryID, "text", "hi")); err != nil || !ins {
+		t.Fatalf("seed: %v %v", ins, err)
+	}
+	a.Close()
+
+	if err := execute([]string{"--store", store, "pending-sends", "clear", "--id", retryID}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	b := newDaemonAppAt(t, f, store)
+	if _, ins, _ := b.DB().BeginPendingSend(storeRow(retryID, "text", "hi")); !ins {
+		t.Fatal("the id is still blocked after clear")
+	}
+	if err := execute([]string{"--store", store, "pending-sends", "clear"}); err == nil {
+		t.Fatal("clear without --id must fail")
+	}
+}
+
+func storeRow(id, kind, text string) store.PendingSend {
+	return store.PendingSend{MsgID: id, ChatJID: "x", TypedTo: "x", Kind: kind, ContentHash: store.ContentHash(kind, text)}
+}
+
+// m-3: the same id for a DIFFERENT message is refused, not reported as sent.
+func TestReusedIDForAnotherMessageIsRefused(t *testing.T) {
+	f := newDaemonFakeWA()
+	a := newDaemonApp(t, f)
+	to := "5511999999999@s.whatsapp.net"
+	if _, err := executeDelegatedSend(context.Background(), a, textRequestWith(to, "first digest")); err != nil {
+		t.Fatal(err)
+	}
+	// The same id, the same chat, other text: a collision, not a retry.
+	_, err := executeDelegatedSend(context.Background(), a, textRequestWith(to, "second digest"))
+	if err == nil || !strings.Contains(err.Error(), "id_reused") {
+		t.Fatalf("err = %v, want id_reused", err)
+	}
+	// And in another chat.
+	_, err = executeDelegatedSend(context.Background(), a, textRequestWith("5511777777777@s.whatsapp.net", "first digest to someone else"))
+	if err == nil || !strings.Contains(err.Error(), "id_reused") {
+		t.Fatalf("other chat, other text: err = %v, want id_reused", err)
+	}
+	if len(f.sendTexts) != 1 {
+		t.Fatalf("sends = %d, want only the first", len(f.sendTexts))
+	}
+}
+
+// m-3: target_mismatch fires only when the typed recipient itself differs from
+// the one the first attempt typed, not on every retry of a rewritten number.
+func TestTargetMismatchOnlyWhenTheTypedRecipientDiffers(t *testing.T) {
+	f := newDaemonFakeWA()
+	f.rewriteOnWhatsApp = func(phone string) (types.JID, bool) {
+		if phone == "+5511987654321" {
+			return types.JID{User: "551187654321", Server: types.DefaultUserServer}, true
+		}
+		return types.JID{}, false
+	}
+	a := newDaemonApp(t, f)
+	typed := "5511987654321@s.whatsapp.net"
+	if _, err := executeDelegatedSend(context.Background(), a, textRequestWith(typed, "hi")); err != nil {
+		t.Fatal(err)
+	}
+	// The same typed number again: a plain retry, no warning. The first attempt's
+	// typed recipient must still be known, so the success keeps it.
+	retry, err := executeDelegatedSend(context.Background(), a, textRequestWith(typed, "hi"))
+	if err != nil || !retry.AlreadySent || retry.TargetMismatch != "" {
+		t.Fatalf("same typed number: %+v err=%v, want already_sent with no warning", retry, err)
+	}
+	// Another number under the same id and text: warn.
+	other, err := executeDelegatedSend(context.Background(), a, textRequestWith("5511666666666@s.whatsapp.net", "hi"))
+	if err != nil || !other.AlreadySent || other.TargetMismatch == "" {
+		t.Fatalf("a different typed number: %+v err=%v, want the warning", other, err)
+	}
+}
+
+// m-6: the commands that send on their own connection write the pending row
+// too, so a cut ack there leaves the same trace the daemon path leaves.
+func TestLocalGuardWritesAndKeepsThePendingRow(t *testing.T) {
+	f := newDaemonFakeWA()
+	a := newDaemonApp(t, f)
+	flags := &rootFlags{}
+	to := "5511999999999@s.whatsapp.net"
+
+	sendCtx, finish, done, err := localIDGuard(context.Background(), flags, a, "text", to, "hi", retryID)
+	if err != nil || done {
+		t.Fatalf("guard: done=%v err=%v", done, err)
+	}
+	if ps, ok, _ := a.DB().GetPendingSend(retryID); !ok || ps.State != store.PendingSendInFlight {
+		t.Fatalf("no in-flight row while the send runs: %+v ok=%v", ps, ok)
+	}
+	// The ack wait was cut after dispatch: the row must stay. The real client
+	// marks the dispatch right before it hands the frame to whatsmeow.
+	wa.MarkDispatched(sendCtx)
+	finish(context.DeadlineExceeded, "")
+	if ps, ok, _ := a.DB().GetPendingSend(retryID); !ok || ps.State != store.PendingSendInFlight {
+		t.Fatalf("an unknown outcome must keep the row: %+v ok=%v", ps, ok)
+	}
+	// A cancellation BEFORE the dispatch mark is definite and releases the id.
+	_, fin2, done2, err2 := localIDGuard(context.Background(), flags, a, "text", to, "hi", "3EB0OTHERID0000003")
+	if done2 || err2 != nil {
+		t.Fatalf("second id guard: %v %v", done2, err2)
+	}
+	fin2(context.Canceled, "")
+	if _, ok, _ := a.DB().GetPendingSend("3EB0OTHERID0000003"); ok {
+		t.Fatal("a cancel before dispatch kept the row")
+	}
+	// A second local attempt is answered resultado_incerto.
+	_, _, done, err = localIDGuard(context.Background(), flags, a, "text", to, "hi", retryID)
+	var unknown *outcomeUnknownError
+	if !done || !errors.As(err, &unknown) {
+		t.Fatalf("second local attempt: done=%v err=%v, want resultado_incerto", done, err)
+	}
+	// No id, no guard.
+	if _, _, done, err := localIDGuard(context.Background(), flags, a, "text", to, "hi", ""); done || err != nil {
+		t.Fatalf("no --id must not guard: %v %v", done, err)
 	}
 }

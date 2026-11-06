@@ -92,11 +92,13 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
-			if newMsgID != "" {
-				if done, err := localAlreadySent(ctx, flags, a, "file", to, newMsgID); err != nil || done {
-					return err
-				}
+			ctx, finishID, idDone, idErr := localIDGuard(ctx, flags, a, "file", to, caption, newMsgID)
+			if idDone {
+				return idErr
 			}
+			var sendErr error
+			var sendStoreWarning string
+			defer func() { finishID(sendErr, sendStoreWarning) }()
 
 			toJID, err := resolveRecipient(a, to, recipientOptions{pick: pick, asJSON: flags.asJSON})
 			if err != nil {
@@ -121,6 +123,10 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
 					ptt:           ptt,
 				})
 			})
+			sendErr = err
+			if err == nil && res.storeWarning != nil {
+				sendStoreWarning = res.storeWarning.Error()
+			}
 			if err != nil {
 				return err
 			}

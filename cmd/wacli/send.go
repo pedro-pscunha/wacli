@@ -117,11 +117,13 @@ func newSendTextCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
-			if newMsgID != "" {
-				if done, err := localAlreadySent(ctx, flags, a, "text", to, newMsgID); err != nil || done {
-					return err
-				}
+			ctx, finishID, idDone, idErr := localIDGuard(ctx, flags, a, "text", to, message, newMsgID)
+			if idDone {
+				return idErr
 			}
+			var sendErr error
+			var sendStoreWarning string
+			defer func() { finishID(sendErr, sendStoreWarning) }()
 
 			toJID, err := resolveRecipient(a, to, recipientOptions{pick: pick, asJSON: flags.asJSON})
 			if err != nil {
@@ -146,6 +148,10 @@ func newSendTextCmd(flags *rootFlags) *cobra.Command {
 
 			preview := fetchLinkPreview(ctx, message, noPreview)
 			msgID, storeErr, err := sendTextWithHistory(ctx, a, reconnectForSend(a), toJID, message, replyTo, replyToSender, preview, mentionedJIDs, ephemeralOpts, textSendOptions{allowSelf: allowSelf})
+			sendErr = err
+			if storeErr != nil {
+				sendStoreWarning = storeErr.Error()
+			}
 			if err != nil {
 				return err
 			}

@@ -209,6 +209,9 @@ func delegateSend(ctx context.Context, flags *rootFlags, req sendDelegateRequest
 		return sendDelegateResponse{}, err
 	}
 	if !resp.OK {
+		if resp.OutcomeUnknown {
+			return resp, &outcomeUnknownError{resp: resp}
+		}
 		return sendDelegateResponse{}, errors.New(resp.Error)
 	}
 	if req.NewID != "" && resp.Sent && resp.ID != req.NewID {
@@ -533,12 +536,18 @@ func writeDelegateResult(conn net.Conn, requestCtx context.Context, req sendDele
 		if requestCtx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			err = fmt.Errorf("delegated %s failed after dispatch and may still have gone through; check before retrying: %w", req.Kind, err)
 		}
-		resp = sendDelegateResponse{OK: false, Error: err.Error()}
+		var unknown *outcomeUnknownError
+		if errors.As(err, &unknown) {
+			// Keep the typed answer: the client turns it into its own exit code.
+			resp = unknown.resp
+		} else {
+			resp = sendDelegateResponse{OK: false, Error: err.Error()}
+		}
 	}
 	_ = json.NewEncoder(conn).Encode(resp)
 }
 
-func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRequest) (_ sendDelegateResponse, sendErr error) {
+func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRequest) (out sendDelegateResponse, sendErr error) {
 	if req.Version != sendDelegateVersion {
 		return sendDelegateResponse{}, fmt.Errorf("unsupported send delegate version %d", req.Version)
 	}
@@ -558,14 +567,15 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 	if resp, done, err := alreadySentResponse(ctx, a, req); err != nil || done {
 		return resp, err
 	}
-	finish, early, err := beginIDSend(a, req)
+	ctx, phase := wa.WithSendPhase(ctx)
+	finish, early, err := beginIDSend(a, req, phase)
 	if err != nil {
 		return sendDelegateResponse{}, err
 	}
 	if early != nil {
-		return *early, errors.New(early.Error)
+		return *early, &outcomeUnknownError{resp: *early}
 	}
-	defer func() { finish(sendErr) }()
+	defer func() { finish(sendErr, out.StoreWarning, out.To) }()
 
 	switch req.Kind {
 	case mediaDownloadKind:

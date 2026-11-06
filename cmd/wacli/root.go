@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -112,6 +113,7 @@ func execute(args []string) error {
 	rootCmd.AddCommand(newCapabilitiesCmd(&flags))
 	rootCmd.AddCommand(newDevicesCmd(&flags))
 	rootCmd.AddCommand(newStoreCmd(&flags))
+	rootCmd.AddCommand(newPendingSendsCmd(&flags))
 
 	rootCmd.SetArgs(args)
 	if err := rootCmd.Execute(); err != nil {
@@ -125,11 +127,45 @@ func writeRootError(flags rootFlags, err error) {
 	if err == nil {
 		return
 	}
+	var unknown *outcomeUnknownError
+	if errors.As(err, &unknown) {
+		writeOutcomeUnknown(flags, unknown.resp)
+		return
+	}
 	if flags.events {
 		_ = out.NewEventWriter(os.Stderr, true).Emit("error", map[string]any{"message": err.Error()})
 		return
 	}
 	_ = out.WriteError(os.Stderr, flags.asJSON, err)
+}
+
+// exitCodeFor gives resultado_incerto its own status, so a caller can tell
+// "check the phone before sending again" from an ordinary failure.
+func exitCodeFor(err error) int {
+	var unknown *outcomeUnknownError
+	if errors.As(err, &unknown) {
+		return exitCodeOutcomeUnknown
+	}
+	return 1
+}
+
+// writeOutcomeUnknown prints the typed answer. In JSON mode it is a regular
+// error envelope plus the machine fields, on stderr like every error.
+func writeOutcomeUnknown(flags rootFlags, resp sendDelegateResponse) {
+	if flags.asJSON {
+		body := map[string]any{
+			"success":         false,
+			"data":            nil,
+			"error":           resp.Error,
+			"code":            outcomeUnknownCode,
+			"outcome_unknown": true,
+			"id":              resp.ID,
+		}
+		b, _ := json.Marshal(body)
+		fmt.Fprintln(os.Stderr, string(b))
+		return
+	}
+	fmt.Fprintln(os.Stderr, out.SanitizeHuman(resp.Error))
 }
 
 func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool) (*app.App, *lock.Lock, error) {

@@ -65,11 +65,13 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
-			if newMsgID != "" {
-				if done, err := localAlreadySent(ctx, flags, a, "react", to, newMsgID); err != nil || done {
-					return err
-				}
+			ctx, finishID, idDone, idErr := localIDGuard(ctx, flags, a, "react", to, emoji, newMsgID)
+			if idDone {
+				return idErr
 			}
+			var sendErr error
+			var sendStoreWarning string
+			defer func() { finishID(sendErr, sendStoreWarning) }()
 			if err := a.Connect(ctx, false, nil); err != nil {
 				return err
 			}
@@ -85,6 +87,7 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
 			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
 				return a.WA().SendReaction(ctx, chat, senderJID, types.MessageID(msgID), emoji)
 			})
+			sendErr = err
 			if err != nil {
 				return err
 			}
@@ -92,6 +95,9 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
 			now := time.Now().UTC()
 			chatName := a.WA().ResolveChatName(ctx, chat, "")
 			storeErr := upsertSentReaction(a.DB(), chat, chatName, sentID, msgID, emoji, now)
+			if storeErr != nil {
+				sendStoreWarning = storeErr.Error()
+			}
 			warnSendStoreFailure(os.Stderr, string(sentID), storeErr)
 
 			waitForPostSendRetryReceipts(ctx, postSendWait)

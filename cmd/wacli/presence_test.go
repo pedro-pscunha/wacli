@@ -99,7 +99,7 @@ func TestPresenceDelegateHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	if err := execute(args); err != nil {
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 

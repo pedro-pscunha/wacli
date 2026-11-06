@@ -26,10 +26,12 @@ type daemonFakeWA struct {
 	nextHandler  uint32
 
 	sendTextErrs []error // consumed one per SendText call
-	sendTexts    []string
-	sendIDs      []types.MessageID
-	idsSeen      []types.MessageID
-	revokes      int
+	// errBeforeWire makes an injected SendText error come before the dispatch mark.
+	errBeforeWire bool
+	sendTexts     []string
+	sendIDs       []types.MessageID
+	idsSeen       []types.MessageID
+	revokes       int
 
 	protoSends     []types.JID
 	deletesForMe   int
@@ -114,9 +116,15 @@ func (f *daemonFakeWA) SendText(ctx context.Context, to types.JID, text string) 
 		err := f.sendTextErrs[0]
 		f.sendTextErrs = f.sendTextErrs[1:]
 		if err != nil {
+			// An error injected as "after dispatch" models the real client: the
+			// mark is set right before SendMessage, so the error comes after it.
+			if !f.errBeforeWire {
+				wa.MarkDispatched(ctx)
+			}
 			return "", err
 		}
 	}
+	wa.MarkDispatched(ctx)
 	f.sendTexts = append(f.sendTexts, text)
 	if id := wa.MessageIDFromContext(ctx); id != "" {
 		return id, nil

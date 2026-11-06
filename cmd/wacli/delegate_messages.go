@@ -30,6 +30,8 @@ type forwardResult struct {
 
 func (r forwardResult) ProducedID() string { return r.ID }
 
+func (r forwardResult) storeWarning() (string, string) { return r.StoreWarning, r.To }
+
 type revokeResult struct {
 	sendMeta
 	Revoked bool   `json:"revoked"`
