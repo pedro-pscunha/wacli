@@ -13,6 +13,7 @@ import (
 
 	"github.com/openclaw/wacli/internal/app"
 	"github.com/openclaw/wacli/internal/store"
+	"github.com/openclaw/wacli/internal/wa"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -105,21 +106,23 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
 	return store.Contact{}, sql.ErrNoRows
 }
 
-// contactReadResolver returns the LID/PN resolver for contact metadata.
-//
-// In the sync daemon it is the live client: whatsmeow learns LID/PN mappings while the daemon runs, and the
-// read-only handle on session.db is opened with immutable=1 whenever no journal sidecar exists, which tells
-// SQLite the file never changes. A handle like that, kept for the daemon's life, answers from the state at
-// its first use (or reads torn pages during a write) and fails by returning "no mapping", silently. So the
-// daemon never uses it. A short-lived command that holds the store lock and has no client uses the read-only
-// handle, which is safe for that lifetime.
 // storeOnlyResolver is the live client's view of the session store for the connection-free kinds. The live
 // ResolvePNToLID falls back to a usync query to WhatsApp on a miss; a kind that is declared connection-free and
-// unpaced must not send that, so PN to LID reads the store only. The other two methods already do.
+// unpaced must not send that, so PN to LID reads the store only. ResolveLIDToPN already reads the store only; ResolveChatName never calls the live client.
 type storeOnlyResolver struct{ live app.WAClient }
 
-func (r storeOnlyResolver) ResolveChatName(ctx context.Context, j types.JID, push string) string {
-	return r.live.ResolveChatName(ctx, j, push)
+// The real client must keep the store-only lookup, or storeOnlyResolver would silently map nothing.
+var _ interface {
+	ResolvePNToLIDStoreOnly(context.Context, types.JID) types.JID
+} = (*wa.Client)(nil)
+
+// ResolveChatName answers from the caller's push name only. The live ResolveChatName can query WhatsApp for
+// a group or newsletter name, so it is not used here; the JID string means "no name".
+func (r storeOnlyResolver) ResolveChatName(_ context.Context, j types.JID, push string) string {
+	if name := strings.TrimSpace(push); name != "" && name != "-" {
+		return name
+	}
+	return j.String()
 }
 func (r storeOnlyResolver) ResolveLIDToPN(ctx context.Context, j types.JID) types.JID {
 	return r.live.ResolveLIDToPN(ctx, j)
@@ -133,6 +136,14 @@ func (r storeOnlyResolver) ResolvePNToLID(ctx context.Context, j types.JID) type
 	return j // a client without the store-only lookup: no mapping, never a query
 }
 
+// contactReadResolver returns the LID/PN resolver for contact metadata.
+//
+// In the sync daemon it is the live client: whatsmeow learns LID/PN mappings while the daemon runs, and the
+// read-only handle on session.db is opened with immutable=1 whenever no journal sidecar exists, which tells
+// SQLite the file never changes. A handle like that, kept for the daemon's life, answers from the state at
+// its first use (or reads torn pages during a write) and fails by returning "no mapping", silently. So the
+// daemon never uses it. A short-lived command that holds the store lock and has no client uses the read-only
+// handle, which is safe for that lifetime.
 func contactReadResolver(ctx context.Context, a *app.App) (app.LocalResolver, error) {
 	if ctx.Value(daemonConnKey{}) != nil {
 		if live := a.WA(); live != nil {
