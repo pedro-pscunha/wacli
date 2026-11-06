@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Delegate: add `--delegate-only` (env `WACLI_DELEGATE_ONLY=1`). A command that would connect to WhatsApp uses the running sync daemon, or fails with `daemon not running; refusing to connect outside the sync daemon`. Only `sync --follow` may connect. A second connection acks messages it never stores.
+- Send: add a caller-chosen message ID, `--id` on every send kind (`--new-id` on react, select, edit and poll vote), carried over the socket as `new_id`. A client refuses a send that an older daemon made with a random ID.
+- Delegate: add the read-only kinds `devices` (linked devices) and `capabilities` (version, socket protocol, accepted kinds), with `wacli devices` and `wacli capabilities`. Socket protocol stays 1.
 - Send: raise the per-attempt timeout (upload plus send) from 45 seconds to 2 minutes, so a large document (an 89 MB video sent `--as document`) no longer times out mid-upload.
 - Accounts: with accounts in `config.yaml` and no `default_account`, a command without `--account`, `--store` or `WACLI_STORE_DIR` fails and names the accounts, instead of using the base store (empty on a multi-account host, so a read answered nothing). `accounts add` sets the default only for the first account.
 - Labels: add `labels list|create|rename|delete|attach|detach`, delegate writes through the running sync daemon outside the send queue (like upstream's chat-state kind), key DM memberships on the LID, and merge phone/LID forms when listing.
