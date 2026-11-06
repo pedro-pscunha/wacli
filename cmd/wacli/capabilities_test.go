@@ -16,7 +16,7 @@ import (
 // in executeDelegatedSend: every listed kind must not hit the default branch,
 // and every case label of the switch must be listed.
 func TestDelegateKindsAreAllAccepted(t *testing.T) {
-	for _, kind := range delegateKinds {
+	for _, kind := range allDelegateKinds() {
 		_, err := executeDelegatedSend(context.Background(), nil, sendDelegateRequest{Version: 99, Kind: kind})
 		if err == nil || !strings.Contains(err.Error(), "unsupported send delegate version") {
 			t.Fatalf("version gate must run first for %q: %v", kind, err)
@@ -31,7 +31,7 @@ func TestDelegateKindsAreAllAccepted(t *testing.T) {
 	end := strings.Index(body[start:], "default:")
 	block := body[start : start+end]
 	listed := map[string]bool{}
-	for _, k := range delegateKinds {
+	for _, k := range allDelegateKinds() {
 		listed[k] = true
 	}
 	literal := regexp.MustCompile(`case ([^:\n]+):`)

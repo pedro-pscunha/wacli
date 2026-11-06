@@ -68,7 +68,7 @@ func (c *Client) RevokeMessage(ctx context.Context, chat types.JID, targetID typ
 	if cli == nil || !cli.IsConnected() {
 		return "", fmt.Errorf("not connected")
 	}
-	resp, err := cli.SendMessage(ctx, chat, cli.BuildRevoke(chat, types.EmptyJID, targetID))
+	resp, err := cli.SendMessage(ctx, chat, cli.BuildRevoke(chat, types.EmptyJID, targetID), sendExtras(ctx, "")...)
 	if err != nil {
 		return "", err
 	}

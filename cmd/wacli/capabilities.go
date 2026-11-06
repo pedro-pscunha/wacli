@@ -28,6 +28,16 @@ var delegateKinds = []string{
 	capabilitiesKind, devicesKind,
 }
 
+// allDelegateKinds is the static list plus the registered kinds, sorted.
+func allDelegateKinds() []string {
+	kinds := append([]string(nil), delegateKinds...)
+	for k := range delegateHandlers {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	return kinds
+}
+
 // delegateCapabilities is the capabilities answer. Protocol is the socket
 // version a client must send in `version`. Features name additive request
 // fields: a client that needs one checks for it here before it relies on it.
@@ -39,8 +49,7 @@ type delegateCapabilities struct {
 }
 
 func currentCapabilities() *delegateCapabilities {
-	kinds := append([]string(nil), delegateKinds...)
-	sort.Strings(kinds)
+	kinds := allDelegateKinds()
 	return &delegateCapabilities{
 		Version:  effectiveVersion(),
 		Protocol: sendDelegateVersion,
@@ -51,7 +60,11 @@ func currentCapabilities() *delegateCapabilities {
 
 // isReadOnlyDelegateKind reports the kinds that only read.
 func isReadOnlyDelegateKind(kind string) bool {
-	return kind == capabilitiesKind || kind == devicesKind
+	if kind == capabilitiesKind || kind == devicesKind {
+		return true
+	}
+	h, ok := delegateHandlers[kind]
+	return ok && h.readOnly
 }
 
 func executeDelegatedCapabilities() (sendDelegateResponse, error) {

@@ -85,6 +85,31 @@ type sendDelegateRequest struct {
 	TimeoutMS        int64    `json:"timeout_ms,omitempty"`
 	DeadlineUnixMS   int64    `json:"deadline_unix_ms,omitempty"`
 	RetryOnPhone     bool     `json:"retry_on_phone,omitempty"`
+	// Fields below are additive (socket protocol stays 1): an older daemon
+	// ignores them and rejects the new kinds as unsupported.
+	Chat         string   `json:"chat,omitempty"`
+	GroupJID     string   `json:"group_jid,omitempty"`
+	Users        []string `json:"users,omitempty"`
+	SubAction    string   `json:"sub_action,omitempty"`
+	Topic        *string  `json:"topic,omitempty"`
+	Code         string   `json:"code,omitempty"`
+	About        string   `json:"about,omitempty"`
+	Picture      []byte   `json:"picture,omitempty"`
+	Preview      bool     `json:"preview,omitempty"`
+	ExistingID   string   `json:"existing_id,omitempty"`
+	DeleteMedia  bool     `json:"delete_media,omitempty"`
+	Announce     bool     `json:"announce,omitempty"`
+	Locked       bool     `json:"locked,omitempty"`
+	JoinApproval bool     `json:"join_approval,omitempty"`
+	Parent       bool     `json:"parent,omitempty"`
+	LinkedParent string   `json:"linked_parent,omitempty"`
+	Count        int      `json:"count,omitempty"`
+	Requests     int      `json:"requests,omitempty"`
+	WaitMS       int64    `json:"wait_ms,omitempty"`
+	Limit        int      `json:"limit,omitempty"`
+	Workers      int      `json:"workers,omitempty"`
+	// Strict makes revoke fail on a message the store does not know.
+	Strict bool `json:"strict,omitempty"`
 }
 
 type sendDelegateResponse struct {
@@ -110,6 +135,8 @@ type sendDelegateResponse struct {
 	Media          *mediaDownloadResult  `json:"media,omitempty"`
 	Devices        []wa.OwnDevice        `json:"devices,omitempty"`
 	Capabilities   *delegateCapabilities `json:"capabilities,omitempty"`
+	// Data carries the typed result of the kinds added after protocol 1 began.
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 type sendDelegateExecutor func(context.Context, sendDelegateRequest) (sendDelegateResponse, error)
@@ -135,7 +162,7 @@ func delegateSend(ctx context.Context, flags *rootFlags, req sendDelegateRequest
 	defer conn.Close()
 
 	deadline := time.Now().Add(commandTimeout(flags))
-	if req.Kind == mediaDownloadKind {
+	if isBulkKind(req.Kind) {
 		// Cache inspection and lock waits already consumed this command's
 		// budget. Never grant recovery a new full timeout after those stages.
 		if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
@@ -223,6 +250,9 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 	// concurrent exact downloads recheck the cache before requesting the phone.
 	mediaSlot := make(chan struct{}, 1)
 	mediaSlot <- struct{}{}
+	// Long backfills (history, media) take one slot of their own.
+	bulkSlot := make(chan struct{}, 1)
+	bulkSlot <- struct{}{}
 	// One pacer shared across connections: it spaces the serialized delegated
 	// sends so a burst of `wacli send` processes delegating to this daemon
 	// leaves the wire paced instead of back-to-back. Disabled = no-op.
@@ -234,7 +264,7 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 			if err != nil {
 				return
 			}
-			go handleSendDelegateConn(ctx, conn, execute, sendSlot, pacer, mediaSlot)
+			go handleSendDelegateConn(ctx, conn, execute, sendSlot, pacer, mediaSlot, bulkSlot)
 		}
 	}()
 
@@ -263,9 +293,12 @@ func removeStaleSendDelegateSocket(path string) error {
 func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateExecutor, sendSlot chan struct{}, pacer *sendPacer, mediaSlots ...chan struct{}) {
 	// Existing direct handler tests omit media support; the production server
 	// supplies one shared media slot across all of its accepted connections.
-	var mediaSlot chan struct{}
+	var mediaSlot, bulkSlot chan struct{}
 	if len(mediaSlots) != 0 {
 		mediaSlot = mediaSlots[0]
+	}
+	if len(mediaSlots) > 1 {
+		bulkSlot = mediaSlots[1]
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
@@ -299,9 +332,15 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
 	// transport alive through its budget and the final response write.
 	_ = conn.SetDeadline(deadline.Add(sendDelegateResponseGrace))
 
-	if req.Kind == mediaDownloadKind {
-		if mediaSlot == nil || req.Version != sendDelegateVersion {
-			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "unsupported media recovery delegate"})
+	if isBulkKind(req.Kind) {
+		// Media recovery shares one slot. Long backfills use their own, so a
+		// backfill never delays an exact media download.
+		slot := mediaSlot
+		if isLongBulkKind(req.Kind) {
+			slot = bulkSlot
+		}
+		if slot == nil || req.Version != sendDelegateVersion {
+			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "unsupported bulk delegate"})
 			return
 		}
 		// Requests carry one JSON value and clients leave the socket open for
@@ -314,8 +353,8 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
 		case <-requestCtx.Done():
 			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "media request expired before recovery dispatch"})
 			return
-		case <-mediaSlot:
-			defer func() { mediaSlot <- struct{}{} }()
+		case <-slot:
+			defer func() { slot <- struct{}{} }()
 		}
 		if requestCtx.Err() != nil {
 			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "media request expired before recovery dispatch"})
@@ -432,6 +471,9 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 		}
 		ctx = wa.WithMessageID(ctx, req.NewID)
 	}
+	if err := validateDelegateRequest(req); err != nil {
+		return sendDelegateResponse{}, err
+	}
 
 	switch req.Kind {
 	case mediaDownloadKind:
@@ -484,7 +526,7 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 	case labelEditKind:
 		return executeDelegatedLabelEdit(ctx, a, req)
 	default:
-		return sendDelegateResponse{}, fmt.Errorf("unsupported send kind %q", req.Kind)
+		return executeRegisteredKind(ctx, a, req)
 	}
 }
 
