@@ -385,21 +385,32 @@ func (a *App) BackfillHistoryLive(ctx context.Context, opts BackfillOptions) (Ba
 	if !a.wa.IsConnected() {
 		return BackfillResult{}, errors.New("not connected")
 	}
+	chatStr := a.canonicalStoreJID(ctx, chat).String()
+	before, _ := a.db.CountChatMessages(chatStr)
 	r := a.newBackfillRunner(ctx, opts, chat)
 	defer r.cleanup()
 	if err := r.run(ctx); err != nil {
 		return BackfillResult{}, err
 	}
-	// Count only what this backfill stored. A whole-database difference would
-	// include live traffic stored during the run and could report a repair that
-	// did not happen.
-	stored := r.stored.Load()
+	// MessagesSynced counts every message the backfill processed, including ones
+	// the store already had. MessagesAdded counts rows that are new in THIS chat,
+	// so a repair that only re-delivered known messages reports zero. Other
+	// chats' live traffic cannot enter it; the chat's own live traffic during
+	// the run still can, so it is an upper bound on what the repair added.
+	after, _ := a.db.CountChatMessages(chatStr)
+	added := after - before
+	if added < 0 {
+		added = 0
+	}
+	if synced := r.stored.Load(); added > synced {
+		added = synced
+	}
 	return BackfillResult{
-		ChatJID:        a.canonicalStoreJID(ctx, chat).String(),
+		ChatJID:        chatStr,
 		RequestsSent:   *r.requestsSent,
 		ResponsesSeen:  *r.responsesSeen,
-		MessagesAdded:  stored,
-		MessagesSynced: stored,
+		MessagesAdded:  added,
+		MessagesSynced: r.stored.Load(),
 	}, nil
 }
 

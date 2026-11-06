@@ -529,3 +529,31 @@ func TestBackfillHistoryLiveCountsOnlyItsOwnMessages(t *testing.T) {
 		t.Fatalf("MessagesAdded = %d, want 1 (the live message must not count)", res.MessagesAdded)
 	}
 }
+
+// m-a: a gap repair that only re-delivers messages the store already has adds
+// nothing. MessagesSynced counts what was processed; MessagesAdded counts new rows.
+func TestBackfillHistoryLiveRedeliveredMessagesAreNotAdded(t *testing.T) {
+	a, f, chat, base := newBackfillRetryTest(t, "anchor", "already-have")
+	f.mu.Lock()
+	f.connected = true
+	f.mu.Unlock()
+	// The primary answers with a message the store already holds.
+	if err := a.db.UpsertMessage(storeUpsertMessage(chat, "known-older", base.Add(-time.Second), "old text")); err != nil {
+		t.Fatal(err)
+	}
+	syncType := waE2E.HistorySyncType_ON_DEMAND
+	notif := &waE2E.HistorySyncNotification{SyncType: &syncType}
+	f.onDemandEvent = func(info types.MessageInfo, count int) any {
+		return &events.Message{Message: &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{HistorySyncNotification: notif}}}
+	}
+	f.downloadHistory = func(*waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+		return backfillTestResponse(chat, "known-older", base.Add(-time.Second)).Data, nil
+	}
+	res, err := a.BackfillHistoryLive(context.Background(), backfillRetryOptions(chat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.MessagesSynced != 1 || res.MessagesAdded != 0 {
+		t.Fatalf("result = %+v, want synced 1 and added 0", res)
+	}
+}
