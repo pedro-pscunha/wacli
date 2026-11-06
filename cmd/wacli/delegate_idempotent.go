@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -62,6 +63,63 @@ func chatMatchesTarget(ctx context.Context, a *app.App, storedChat, target strin
 		}
 	}
 	return false
+}
+
+// errSendOutcomeUnknown marks a send whose result nobody knows: an earlier
+// attempt with the same --id started, and neither a stored message nor a clean
+// failure says how it ended. The caller must check the chat before resending.
+const outcomeUnknownCode = "resultado_incerto"
+
+// beginIDSend is the second half of the retry guard, after the stored-message
+// check. It records the send with a pending row before anything goes on the
+// wire. A retry that finds a row left by an attempt that never finished answers
+// resultado_incerto and does not resend: that attempt may have reached the
+// recipient, and the same id would make WhatsApp's own deduplication the only
+// protection.
+//
+// finish must be called with the send's error. A clean failure before the wire
+// (validation, not connected) removes the row so the caller can retry at once.
+// A success removes it too, since the stored message now proves the send. An
+// error that leaves the outcome unknown keeps the row.
+func beginIDSend(a *app.App, req sendDelegateRequest) (finish func(error), early *sendDelegateResponse, err error) {
+	if req.NewID == "" || !kindStoresSentMessage[req.Kind] || a == nil || a.DB() == nil {
+		return func(error) {}, nil, nil
+	}
+	chat := strings.TrimSpace(req.To)
+	if chat == "" {
+		chat = strings.TrimSpace(req.Chat)
+	}
+	state, inserted, err := a.DB().BeginPendingSend(req.NewID, chat)
+	if err != nil {
+		return nil, nil, fmt.Errorf("record pending send %s: %w", req.NewID, err)
+	}
+	if !inserted {
+		resp := sendDelegateResponse{
+			OK: false, Error: outcomeUnknownCode + ": an earlier attempt with --id " + req.NewID +
+				" started and did not finish (state " + state + "); check the chat for the message before sending again",
+			OutcomeUnknown: true, ID: req.NewID,
+		}
+		return nil, &resp, nil
+	}
+	return func(sendErr error) {
+		if sendErr == nil || !sendOutcomeUnknown(sendErr) {
+			_ = a.DB().FinishPendingSend(req.NewID)
+		}
+	}, nil, nil
+}
+
+// sendOutcomeUnknown reports whether an error leaves open that the message
+// reached WhatsApp: a timeout or cancellation after dispatch. Errors raised
+// before the wire (bad input, no connection) are definite.
+func sendOutcomeUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timed out") || strings.Contains(msg, "may still have gone through") || strings.Contains(msg, "timeout")
 }
 
 // localAlreadySent is the same check for a command that runs on its own

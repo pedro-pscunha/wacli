@@ -169,7 +169,15 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 		applySendMeta(&cached, resp)
 		return cached, nil
 	}
+	finish, early, err := beginIDSend(a, req)
+	if err != nil {
+		return zero, err
+	}
+	if early != nil {
+		return zero, errors.New(early.Error)
+	}
 	res, err := h.run(ctx, a, req)
+	finish(err)
 	if err != nil {
 		return zero, err
 	}

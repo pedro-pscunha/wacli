@@ -143,6 +143,9 @@ type sendDelegateResponse struct {
 	// TargetMismatch is a warning on an already_sent answer: the stored message
 	// went to a different JID than the typed recipient (WhatsApp rewrote it).
 	TargetMismatch string `json:"target_mismatch,omitempty"`
+	// OutcomeUnknown (code resultado_incerto) means an earlier attempt with this
+	// --id started and never finished; nothing was sent this time.
+	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
 	// IDMismatch is set by the client, never sent by a daemon: the id the
 	// caller asked for, when the daemon sent the message under another id.
 	IDMismatch string `json:"id_mismatch,omitempty"`
@@ -533,7 +536,7 @@ func writeDelegateResult(conn net.Conn, requestCtx context.Context, req sendDele
 	_ = json.NewEncoder(conn).Encode(resp)
 }
 
-func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRequest) (sendDelegateResponse, error) {
+func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRequest) (_ sendDelegateResponse, sendErr error) {
 	if req.Version != sendDelegateVersion {
 		return sendDelegateResponse{}, fmt.Errorf("unsupported send delegate version %d", req.Version)
 	}
@@ -553,6 +556,14 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 	if resp, done, err := alreadySentResponse(ctx, a, req); err != nil || done {
 		return resp, err
 	}
+	finish, early, err := beginIDSend(a, req)
+	if err != nil {
+		return sendDelegateResponse{}, err
+	}
+	if early != nil {
+		return *early, errors.New(early.Error)
+	}
+	defer func() { finish(sendErr) }()
 
 	switch req.Kind {
 	case mediaDownloadKind:

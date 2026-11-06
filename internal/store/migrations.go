@@ -47,6 +47,23 @@ var schemaMigrations = []migration{
 	{version: 31, name: "content-free message change journal", up: migrateChanges},
 	{version: 32, name: "message receipt retrieval revisions", up: migrateReceiptRetrieval},
 	{version: 33, name: "own message id lookup index", up: migrateOwnMessageIDIndex},
+	{version: 34, name: "pending sends", up: migratePendingSends},
+}
+
+// migratePendingSends creates the table that records a send with a caller-chosen
+// id before it goes on the wire. It is separate from messages so an unfinished
+// send never shows up in a chat. An older binary ignores the table.
+func migratePendingSends(d *DB) error {
+	if _, err := d.sql.Exec(`
+		CREATE TABLE IF NOT EXISTS pending_sends (
+			msg_id TEXT PRIMARY KEY,
+			chat_jid TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`); err != nil {
+		return fmt.Errorf("create pending_sends table: %w", err)
+	}
+	return nil
 }
 
 // migrateOwnMessageIDIndex lets FindOwnMessage find a sent message by its id

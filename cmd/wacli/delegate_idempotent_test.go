@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,5 +124,58 @@ func TestNoNewIDStillSendsEveryTime(t *testing.T) {
 	}
 	if len(f.sendTexts) != 2 {
 		t.Fatalf("sends = %d, want 2", len(f.sendTexts))
+	}
+}
+
+// m-h: a send whose outcome is unknown (the ack wait was cut) leaves a pending
+// row. The retry with the same id answers resultado_incerto and does not resend.
+func TestUnknownOutcomeBlocksARetryWithResultadoIncerto(t *testing.T) {
+	f := newDaemonFakeWA()
+	f.sendTextErrs = []error{errors.New("send timed out after 2m0s")}
+	a := newDaemonApp(t, f)
+	to := "5511999999999@s.whatsapp.net"
+
+	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to)); err == nil {
+		t.Fatal("the first attempt should fail with the timeout")
+	}
+	resp, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to))
+	if err == nil || !strings.Contains(err.Error(), "resultado_incerto") {
+		t.Fatalf("retry err = %v, want resultado_incerto", err)
+	}
+	if !resp.OutcomeUnknown || resp.ID != retryID {
+		t.Fatalf("retry resp = %+v", resp)
+	}
+	if len(f.sendTexts) != 0 || len(f.idsSeen) != 1 {
+		t.Fatalf("the retry went on the wire: sends=%d attempts=%d", len(f.sendTexts), len(f.idsSeen))
+	}
+}
+
+// A failure before the wire is definite: the row goes away and the retry sends.
+func TestCleanFailureDoesNotBlockTheRetry(t *testing.T) {
+	f := newDaemonFakeWA()
+	f.sendTextErrs = []error{errors.New("not connected")}
+	a := newDaemonApp(t, f)
+	to := "5511999999999@s.whatsapp.net"
+	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to)); err == nil {
+		t.Fatal("the first attempt should fail")
+	}
+	resp, err := executeDelegatedSend(context.Background(), a, sendTextRequest(to))
+	if err != nil || !resp.Sent || resp.AlreadySent {
+		t.Fatalf("retry = %+v err=%v", resp, err)
+	}
+	if len(f.sendTexts) != 1 {
+		t.Fatalf("sends = %d", len(f.sendTexts))
+	}
+}
+
+// A success leaves no pending row behind: the stored message is the proof.
+func TestSuccessfulSendClearsThePendingRow(t *testing.T) {
+	f := newDaemonFakeWA()
+	a := newDaemonApp(t, f)
+	if _, err := executeDelegatedSend(context.Background(), a, sendTextRequest("5511999999999@s.whatsapp.net")); err != nil {
+		t.Fatal(err)
+	}
+	if _, inserted, _ := a.DB().BeginPendingSend(retryID, "x"); !inserted {
+		t.Fatal("a pending row survived a successful send")
 	}
 }
