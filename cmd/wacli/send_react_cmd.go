@@ -22,6 +22,7 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
 	var sender string
 	postSendWait := postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "react",
 		Short: "React to a message",
@@ -33,13 +34,18 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
 				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
 					Kind:           "react",
+					NewID:          newMsgID,
 					To:             to,
 					ID:             msgID,
 					Reaction:       emoji,
@@ -104,6 +110,7 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&to, "to", "", "recipient phone number (+E164 and formatting ok) or JID")
+	cmd.Flags().StringVar(&newMsgID, "new-id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().StringVar(&msgID, "id", "", "target message ID")
 	cmd.Flags().StringVar(&emoji, "reaction", "\U0001f44d", "reaction emoji (pass an empty string to remove)")
 	cmd.Flags().StringVar(&sender, "sender", "", "message sender JID (required for group messages)")

@@ -52,36 +52,39 @@ type sendDelegateRequest struct {
 	As                   string   `json:"as,omitempty"`
 	PTT                  bool     `json:"ptt,omitempty"`
 	ID                   string   `json:"id,omitempty"`
-	Reaction             string   `json:"reaction,omitempty"`
-	Sender               string   `json:"sender,omitempty"`
-	Label                string   `json:"label,omitempty"`
-	ButtonID             string   `json:"button_id,omitempty"`
-	SelectIndex          int      `json:"select_index,omitempty"`
-	Type                 string   `json:"type,omitempty"`
-	Latitude             float64  `json:"latitude,omitempty"`
-	Longitude            float64  `json:"longitude,omitempty"`
-	Name                 string   `json:"name,omitempty"`
-	Question             string   `json:"question,omitempty"`
-	Options              []string `json:"options,omitempty"`
-	Selectable           int      `json:"selectable,omitempty"`
-	PresenceState        string   `json:"presence_state,omitempty"`
-	PresenceMedia        string   `json:"presence_media,omitempty"`
-	PresenceWaitMS       int64    `json:"presence_wait_ms,omitempty"`
-	Read                 *bool    `json:"read,omitempty"`
-	Receipts             bool     `json:"receipts,omitempty"`
-	ThroughMessageID     string   `json:"through_message_id,omitempty"`
-	Phones               []string `json:"phones,omitempty"`
-	ChatStateAction      string   `json:"chat_state_action,omitempty"`
-	MuteDurationMS       int64    `json:"mute_duration_ms,omitempty"`
-	Enable               *bool    `json:"enable,omitempty"`
-	LabelID              string   `json:"label_id,omitempty"`
-	LabelName            string   `json:"label_name,omitempty"`
-	LabelColor           int32    `json:"label_color,omitempty"`
-	LabelDeleted         bool     `json:"label_deleted,omitempty"`
-	PostSendWaitMS       int64    `json:"post_send_wait_ms,omitempty"`
-	TimeoutMS            int64    `json:"timeout_ms,omitempty"`
-	DeadlineUnixMS       int64    `json:"deadline_unix_ms,omitempty"`
-	RetryOnPhone         bool     `json:"retry_on_phone,omitempty"`
+	// NewID is the caller-chosen ID for the message this request sends. ID is
+	// the target of react, edit and similar kinds.
+	NewID            string   `json:"new_id,omitempty"`
+	Reaction         string   `json:"reaction,omitempty"`
+	Sender           string   `json:"sender,omitempty"`
+	Label            string   `json:"label,omitempty"`
+	ButtonID         string   `json:"button_id,omitempty"`
+	SelectIndex      int      `json:"select_index,omitempty"`
+	Type             string   `json:"type,omitempty"`
+	Latitude         float64  `json:"latitude,omitempty"`
+	Longitude        float64  `json:"longitude,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	Question         string   `json:"question,omitempty"`
+	Options          []string `json:"options,omitempty"`
+	Selectable       int      `json:"selectable,omitempty"`
+	PresenceState    string   `json:"presence_state,omitempty"`
+	PresenceMedia    string   `json:"presence_media,omitempty"`
+	PresenceWaitMS   int64    `json:"presence_wait_ms,omitempty"`
+	Read             *bool    `json:"read,omitempty"`
+	Receipts         bool     `json:"receipts,omitempty"`
+	ThroughMessageID string   `json:"through_message_id,omitempty"`
+	Phones           []string `json:"phones,omitempty"`
+	ChatStateAction  string   `json:"chat_state_action,omitempty"`
+	MuteDurationMS   int64    `json:"mute_duration_ms,omitempty"`
+	Enable           *bool    `json:"enable,omitempty"`
+	LabelID          string   `json:"label_id,omitempty"`
+	LabelName        string   `json:"label_name,omitempty"`
+	LabelColor       int32    `json:"label_color,omitempty"`
+	LabelDeleted     bool     `json:"label_deleted,omitempty"`
+	PostSendWaitMS   int64    `json:"post_send_wait_ms,omitempty"`
+	TimeoutMS        int64    `json:"timeout_ms,omitempty"`
+	DeadlineUnixMS   int64    `json:"deadline_unix_ms,omitempty"`
+	RetryOnPhone     bool     `json:"retry_on_phone,omitempty"`
 }
 
 type sendDelegateResponse struct {
@@ -164,6 +167,11 @@ func delegateSend(ctx context.Context, flags *rootFlags, req sendDelegateRequest
 	}
 	if !resp.OK {
 		return sendDelegateResponse{}, errors.New(resp.Error)
+	}
+	if req.NewID != "" && resp.Sent && resp.ID != req.NewID {
+		// A daemon built before --id existed ignores new_id and sends with a
+		// random ID. Say so: the caller keys its idempotency on the ID.
+		return sendDelegateResponse{}, fmt.Errorf("the sync daemon ignored --id %s and sent the message with id %s (daemon too old); do not retry", req.NewID, resp.ID)
 	}
 	return resp, nil
 }
@@ -406,6 +414,12 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 	}
 	ctx, cancel := context.WithTimeout(parent, millisDuration(req.TimeoutMS, 5*time.Minute))
 	defer cancel()
+	if req.NewID != "" {
+		if err := wa.ValidateMessageID(req.NewID); err != nil {
+			return sendDelegateResponse{}, err
+		}
+		ctx = wa.WithMessageID(ctx, req.NewID)
+	}
 
 	switch req.Kind {
 	case mediaDownloadKind:

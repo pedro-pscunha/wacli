@@ -852,3 +852,75 @@ func TestDelegatedChatStateHonorsAbsoluteCallerDeadline(t *testing.T) {
 	default:
 	}
 }
+
+func TestSendTextIDDelegatesThroughSendSocket(t *testing.T) {
+	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
+	storeDir := shortPresenceDelegateStoreDir(t)
+	lk, err := lock.Acquire(storeDir)
+	if err != nil {
+		t.Fatalf("lock store: %v", err)
+	}
+	defer lk.Release()
+
+	const want = "3EB0ABCDEF0123456789"
+	server := startPresenceDelegateTestSocket(t, storeDir, func(req sendDelegateRequest) sendDelegateResponse {
+		return sendDelegateResponse{OK: true, Sent: true, To: "15551234567@s.whatsapp.net", ID: req.NewID}
+	})
+	defer server.stop()
+
+	stdout, stderr, err := runPresenceDelegateHelper(t, []string{
+		"--store", storeDir, "--json", "--timeout", "750ms",
+		"send", "text", "--to", "+15551234567", "--message", "hi", "--id", want,
+	})
+	if err != nil {
+		t.Fatalf("send text failed: %v stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if req := server.nextRequest(t); req.NewID != want {
+		t.Fatalf("delegate NewID = %q, want %q", req.NewID, want)
+	}
+	if !strings.Contains(stdout, `"id":"`+want+`"`) {
+		t.Fatalf("stdout %q does not return the message id", stdout)
+	}
+}
+
+func TestSendTextIDRefusesDaemonThatIgnoresIt(t *testing.T) {
+	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
+	storeDir := shortPresenceDelegateStoreDir(t)
+	lk, err := lock.Acquire(storeDir)
+	if err != nil {
+		t.Fatalf("lock store: %v", err)
+	}
+	defer lk.Release()
+
+	server := startPresenceDelegateTestSocket(t, storeDir, func(req sendDelegateRequest) sendDelegateResponse {
+		return sendDelegateResponse{OK: true, Sent: true, To: "15551234567@s.whatsapp.net", ID: "RANDOMID12345"}
+	})
+	defer server.stop()
+
+	_, stderr, err := runPresenceDelegateHelper(t, []string{
+		"--store", storeDir, "--json", "--timeout", "750ms",
+		"send", "text", "--to", "+15551234567", "--message", "hi", "--id", "3EB0ABCDEF0123456789",
+	})
+	if err == nil || !strings.Contains(stderr, "daemon too old") {
+		t.Fatalf("err=%v stderr=%q, want an old-daemon error", err, stderr)
+	}
+}
+
+func TestSendIDRejectsInvalidFormatBeforeAnyIO(t *testing.T) {
+	store := t.TempDir()
+	err := execute([]string{"--store", store, "send", "text", "--to", "+15551234567", "--message", "hi", "--id", "bad id!"})
+	if err == nil || !strings.Contains(err.Error(), "invalid message id") {
+		t.Fatalf("err = %v", err)
+	}
+	err = execute([]string{"--store", store, "send", "react", "--to", "+15551234567", "--id", "ABCDEFGH12", "--new-id", "x"})
+	if err == nil || !strings.Contains(err.Error(), "invalid message id") {
+		t.Fatalf("react err = %v", err)
+	}
+}
+
+func TestExecuteDelegatedSendRejectsInvalidNewID(t *testing.T) {
+	_, err := executeDelegatedSend(context.Background(), nil, sendDelegateRequest{Version: sendDelegateVersion, Kind: "text", NewID: "no good"})
+	if err == nil || !strings.Contains(err.Error(), "invalid message id") {
+		t.Fatalf("err = %v", err)
+	}
+}

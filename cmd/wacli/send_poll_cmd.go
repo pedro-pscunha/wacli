@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/openclaw/wacli/internal/wa"
 	"os"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
 	var ephemeral bool
 	postSendWait := postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "poll",
 		Short: "Send a poll",
@@ -54,13 +56,18 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
 				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
 					Kind:           "poll",
+					NewID:          newMsgID,
 					To:             to,
 					Pick:           pick,
 					Question:       question,
@@ -120,6 +127,7 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&to, "to", "", "recipient JID, phone number, or contact/group/chat name")
+	cmd.Flags().StringVar(&newMsgID, "id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().IntVar(&pick, "pick", 0, "when --to is ambiguous, pick the Nth match (1-indexed)")
 	cmd.Flags().StringVar(&question, "question", "", "poll question")
 	cmd.Flags().StringArrayVar(&options, "option", nil, "poll option (repeat for each option, 2-12 total)")

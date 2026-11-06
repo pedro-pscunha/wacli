@@ -30,7 +30,7 @@ func (c *Client) SendPoll(ctx context.Context, to types.JID, name string, option
 	if ephemeral {
 		msg = wrapEphemeralPollMessage(msg)
 	}
-	resp, err := cli.SendMessage(ctx, to, msg)
+	resp, err := cli.SendMessage(ctx, to, msg, sendExtras(ctx, "")...)
 	if err != nil {
 		return "", err
 	}
@@ -108,7 +108,7 @@ func (c *Client) SendPollVote(ctx context.Context, pollInfo *types.MessageInfo, 
 	if err != nil {
 		return "", fmt.Errorf("build poll vote: %w", err)
 	}
-	resp, err := cli.SendMessage(ctx, info.Chat, msg)
+	resp, err := cli.SendMessage(ctx, info.Chat, msg, sendExtras(ctx, "")...)
 	if err != nil {
 		return "", err
 	}

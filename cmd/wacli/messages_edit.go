@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/openclaw/wacli/internal/wa"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ func newMessagesEditCmd(flags *rootFlags) *cobra.Command {
 	var message string
 	postSendWait := postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "edit",
 		Short: "Edit one of your recent sent text messages",
@@ -31,13 +33,18 @@ func newMessagesEditCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
 				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
 					Kind:           "edit",
+					NewID:          newMsgID,
 					To:             chat,
 					ID:             id,
 					Message:        message,
@@ -105,6 +112,7 @@ func newMessagesEditCmd(flags *rootFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&chat, "chat", "", "chat JID, phone number, or contact/group/chat name")
+	cmd.Flags().StringVar(&newMsgID, "new-id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().StringVar(&id, "id", "", "message ID to edit")
 	cmd.Flags().StringVar(&message, "message", "", "new message text")
 	cmd.Flags().DurationVar(&postSendWait, "post-send-wait", postSendRetryReceiptWait, "keep the connection alive after edit so retry receipts can be handled (0 disables)")

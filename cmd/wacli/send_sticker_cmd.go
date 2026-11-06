@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/openclaw/wacli/internal/wa"
 	"os"
 	"path/filepath"
 	"time"
@@ -19,6 +20,7 @@ func newSendStickerCmd(flags *rootFlags) *cobra.Command {
 	var replyToSender string
 	postSendWait := postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "sticker",
 		Short: "Send a sticker (WebP image)",
@@ -33,8 +35,12 @@ func newSendStickerCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
@@ -44,6 +50,7 @@ func newSendStickerCmd(flags *rootFlags) *cobra.Command {
 				}
 				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
 					Kind:           "sticker",
+					NewID:          newMsgID,
 					To:             to,
 					Pick:           pick,
 					File:           delegateFile,
@@ -104,6 +111,7 @@ func newSendStickerCmd(flags *rootFlags) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&to, "to", "", "recipient JID, phone number, or contact/group/chat name")
+	cmd.Flags().StringVar(&newMsgID, "id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().IntVar(&pick, "pick", 0, "when --to is ambiguous, pick the Nth match (1-indexed)")
 	cmd.Flags().StringVar(&filePath, "file", "", "path to WebP sticker file")
 	cmd.Flags().StringVar(&replyTo, "reply-to", "", "message ID to quote/reply to")

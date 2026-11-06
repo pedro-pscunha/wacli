@@ -52,6 +52,7 @@ func newSendTextCmd(flags *rootFlags) *cobra.Command {
 	var messageEscapes bool
 	postSendWait := postSendRetryReceiptWait
 
+	var newMsgID string
 	cmd := &cobra.Command{
 		Use:   "text",
 		Short: "Send a text message",
@@ -78,13 +79,18 @@ func newSendTextCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateNewMessageID(newMsgID); err != nil {
+				return err
+			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
+			ctx = wa.WithMessageID(ctx, newMsgID)
 
 			a, lk, err := newApp(ctx, flags, true, false)
 			if err != nil {
 				resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
 					Kind:                 "text",
+					NewID:                newMsgID,
 					To:                   to,
 					Pick:                 pick,
 					Message:              message,
@@ -156,6 +162,7 @@ func newSendTextCmd(flags *rootFlags) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&to, "to", "", "recipient JID, phone number, or contact/group/chat name")
+	cmd.Flags().StringVar(&newMsgID, "id", "", "caller-chosen WhatsApp message ID for this send (8-64 letters or digits; default: random)")
 	cmd.Flags().IntVar(&pick, "pick", 0, "when --to is ambiguous, pick the Nth match (1-indexed)")
 	cmd.Flags().StringVar(&message, "message", "", "message text")
 	cmd.Flags().StringArrayVar(&mentions, "mention", nil, "phone number or user JID to mention (repeatable)")
