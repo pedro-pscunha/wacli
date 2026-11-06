@@ -52,6 +52,7 @@ func newMessagesForwardCmd(flags *rootFlags) *cobra.Command {
 			}
 			if flags.asJSON {
 				body := map[string]any{"forwarded": true, "to": res.To, "id": res.ID, "source": res.Source}
+				addSendMetaFields(body, res.sendMeta)
 				if res.StoreWarning != "" {
 					body["store_warning"] = res.StoreWarning
 				}

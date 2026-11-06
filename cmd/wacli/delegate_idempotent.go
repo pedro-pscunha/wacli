@@ -73,3 +73,18 @@ func localAlreadySent(ctx context.Context, flags *rootFlags, a *app.App, kind, t
 	}
 	return true, writeDelegatedSendOutput(flags, kind, resp)
 }
+
+// addSendMetaFields puts the retry and mismatch facts into a JSON body, the
+// same keys `send` prints.
+func addSendMetaFields(body map[string]any, m sendMeta) {
+	if m.AlreadySent {
+		body["already_sent"] = true
+	}
+	if m.TargetMismatch != "" {
+		body["target_mismatch"] = m.TargetMismatch
+	}
+	if m.IDRequested != "" {
+		body["id_requested"] = m.IDRequested
+		body["warning"] = "the sync daemon ignored --new-id; the message was sent under the id above"
+	}
+}

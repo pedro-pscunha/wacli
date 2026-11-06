@@ -20,6 +20,7 @@ const (
 )
 
 type forwardResult struct {
+	sendMeta
 	Forwarded    bool   `json:"forwarded"`
 	To           string `json:"to"`
 	ID           string `json:"id"`
@@ -30,6 +31,7 @@ type forwardResult struct {
 func (r forwardResult) ProducedID() string { return r.ID }
 
 type revokeResult struct {
+	sendMeta
 	Revoked bool   `json:"revoked"`
 	To      string `json:"to"`
 	ID      string `json:"id"`

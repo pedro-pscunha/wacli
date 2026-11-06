@@ -104,6 +104,27 @@ func resultResponse(res any) (sendDelegateResponse, error) {
 	return resp, nil
 }
 
+// sendMeta carries the response-level facts about a send into a typed result:
+// the daemon answers them beside `data`, and a result that dropped them would
+// lose the retry and mismatch warnings the caller keys on.
+type sendMeta struct {
+	AlreadySent    bool   `json:"already_sent,omitempty"`
+	TargetMismatch string `json:"target_mismatch,omitempty"`
+	IDRequested    string `json:"id_requested,omitempty"`
+}
+
+func (m *sendMeta) setSendMeta(r sendDelegateResponse) {
+	m.AlreadySent, m.TargetMismatch, m.IDRequested = r.AlreadySent, r.TargetMismatch, r.IDMismatch
+}
+
+type sendMetaSetter interface{ setSendMeta(sendDelegateResponse) }
+
+func applySendMeta(out any, r sendDelegateResponse) {
+	if m, ok := out.(sendMetaSetter); ok {
+		m.setSendMeta(r)
+	}
+}
+
 // callKind validates a registered kind, then runs it on the daemon (lock held
 // by it) or on this process's own connection. The result type is the same on
 // both paths.
@@ -131,6 +152,7 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 				return zero, fmt.Errorf("decode the sync daemon's answer: %w", err)
 			}
 		}
+		applySendMeta(&out, resp)
 		return out, nil
 	}
 	defer closeApp(a, lk)
@@ -144,6 +166,7 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 		if len(resp.Data) > 0 {
 			_ = json.Unmarshal(resp.Data, &cached)
 		}
+		applySendMeta(&cached, resp)
 		return cached, nil
 	}
 	res, err := h.run(ctx, a, req)

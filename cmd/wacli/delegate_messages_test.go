@@ -70,3 +70,15 @@ func TestMessageKindsRejectBadInputBeforeIO(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// m-e: the mismatch and retry facts survive the typed-result path.
+func TestForwardKeepsIDMismatchAndAlreadySentFromTheDaemon(t *testing.T) {
+	// An old daemon that ignored --new-id: it sent under another id.
+	_, stdout := runKindViaSocket(t, `{"forwarded":true,"to":"5511@s.whatsapp.net","id":"OLDRANDOMID1","source":"SRC"}`, "OLDRANDOMID1",
+		"messages", "forward", "--chat", "5511999999999", "--id", "SRC12345", "--to", "5511888888888", "--new-id", "3EB0ABCDEF0123456789")
+	for _, want := range []string{`"id":"OLDRANDOMID1"`, `"id_requested":"3EB0ABCDEF0123456789"`, `"warning"`} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("forward output lacks %s: %q", want, stdout)
+		}
+	}
+}

@@ -125,12 +125,14 @@ func newMessagesRevokeCmd(flags *rootFlags) *cobra.Command {
 
 func writeRevokeOutput(flags *rootFlags, res revokeResult, verb string) error {
 	if flags.asJSON {
-		return out.WriteJSON(os.Stdout, map[string]any{
+		body := map[string]any{
 			"revoked": true,
 			"to":      res.To,
 			"id":      res.ID,
 			"target":  res.Target,
-		})
+		}
+		addSendMetaFields(body, res.sendMeta)
+		return out.WriteJSON(os.Stdout, body)
 	}
 	fmt.Fprintf(os.Stdout, "%s message %s in %s (id %s)\n", verb, res.Target, res.To, res.ID)
 	return nil
