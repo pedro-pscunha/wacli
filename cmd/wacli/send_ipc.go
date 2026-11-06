@@ -140,6 +140,9 @@ type sendDelegateResponse struct {
 	// AlreadySent means a message with the requested --id was already sent and
 	// stored, so nothing went on the wire this time. ID is that message.
 	AlreadySent bool `json:"already_sent,omitempty"`
+	// TargetMismatch is a warning on an already_sent answer: the stored message
+	// went to a different JID than the typed recipient (WhatsApp rewrote it).
+	TargetMismatch string `json:"target_mismatch,omitempty"`
 	// IDMismatch is set by the client, never sent by a daemon: the id the
 	// caller asked for, when the daemon sent the message under another id.
 	IDMismatch string `json:"id_mismatch,omitempty"`
@@ -934,6 +937,9 @@ func writeDelegatedSendOutput(flags *rootFlags, kind string, resp sendDelegateRe
 		body := map[string]any{"sent": resp.Sent, "to": resp.To, "id": resp.ID}
 		if resp.AlreadySent {
 			body["already_sent"] = true
+		}
+		if resp.TargetMismatch != "" {
+			body["target_mismatch"] = resp.TargetMismatch
 		}
 		if resp.IDMismatch != "" {
 			body["id_requested"] = resp.IDMismatch

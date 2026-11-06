@@ -40,6 +40,10 @@ type daemonFakeWA struct {
 	joinedGroups   []*types.GroupInfo
 	newsletters    []*types.NewsletterMetadata
 	historyRequest int
+
+	// rewriteOnWhatsApp models the registration check returning a different JID
+	// than the typed number (the Brazilian ninth digit).
+	rewriteOnWhatsApp func(phone string) (types.JID, bool)
 }
 
 func newDaemonFakeWA() *daemonFakeWA {
@@ -87,8 +91,17 @@ func (f *daemonFakeWA) ResolveLIDToPN(_ context.Context, j types.JID) types.JID 
 func (f *daemonFakeWA) GetUserInfo(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) {
 	return nil, nil
 }
-func (f *daemonFakeWA) IsOnWhatsApp(context.Context, []string) ([]types.IsOnWhatsAppResponse, error) {
-	return nil, nil
+func (f *daemonFakeWA) IsOnWhatsApp(_ context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error) {
+	if f.rewriteOnWhatsApp == nil {
+		return nil, nil
+	}
+	var out []types.IsOnWhatsAppResponse
+	for _, p := range phones {
+		if jid, ok := f.rewriteOnWhatsApp(p); ok {
+			out = append(out, types.IsOnWhatsAppResponse{Query: p, JID: jid, IsIn: true})
+		}
+	}
+	return out, nil
 }
 func (f *daemonFakeWA) GetGroupInfo(context.Context, types.JID) (*types.GroupInfo, error) {
 	return nil, nil

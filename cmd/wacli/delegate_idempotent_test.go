@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/openclaw/wacli/internal/store"
+	"go.mau.fi/whatsmeow/types"
 )
 
 const retryID = "3EB0RETRYID0000001"
@@ -37,8 +38,10 @@ func TestNewIDRetryDoesNotSendTwice(t *testing.T) {
 	}
 }
 
-// An id that names a message in another chat is spent: refuse, send nothing.
-func TestNewIDFromAnotherChatIsRefused(t *testing.T) {
+// MAJ-2: the id is unique per action, so a from-me hit in any chat means the
+// action was sent. The answer names the stored chat and warns; it never asks for
+// another id, which would send the same text twice.
+func TestNewIDHitInAnotherChatIsAlreadySentWithWarning(t *testing.T) {
 	f := newDaemonFakeWA()
 	a := newDaemonApp(t, f)
 	if err := a.DB().UpsertChat("5511888888888@s.whatsapp.net", "dm", "other", time.Now()); err != nil {
@@ -47,9 +50,46 @@ func TestNewIDFromAnotherChatIsRefused(t *testing.T) {
 	if err := a.DB().UpsertMessage(store.UpsertMessageParams{ChatJID: "5511888888888@s.whatsapp.net", MsgID: retryID, Timestamp: time.Now(), FromMe: true, Text: "old"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := executeDelegatedSend(context.Background(), a, sendTextRequest("5511999999999@s.whatsapp.net"))
-	if err == nil || len(f.sendTexts) != 0 {
-		t.Fatalf("err=%v sent=%v", err, f.sendTexts)
+	resp, err := executeDelegatedSend(context.Background(), a, sendTextRequest("5511999999999@s.whatsapp.net"))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !resp.AlreadySent || resp.To != "5511888888888@s.whatsapp.net" || resp.TargetMismatch == "" || len(f.sendTexts) != 0 {
+		t.Fatalf("resp = %+v sends=%d", resp, len(f.sendTexts))
+	}
+}
+
+// The real case: the registration check rewrites 55119XXXXXXXX to 5511XXXXXXXX,
+// the first send stores under the rewritten JID, and the retry carries the typed
+// number. It must be recognized as sent.
+func TestNewIDRetryAfterBrazilianNinthDigitRewrite(t *testing.T) {
+	f := newDaemonFakeWA()
+	f.rewriteOnWhatsApp = func(phone string) (types.JID, bool) {
+		// +5511987654321 -> 551187654321 (the ninth digit dropped)
+		if phone == "+5511987654321" {
+			return types.JID{User: "551187654321", Server: types.DefaultUserServer}, true
+		}
+		return types.JID{}, false
+	}
+	a := newDaemonApp(t, f)
+	typed := "5511987654321@s.whatsapp.net"
+
+	first, err := executeDelegatedSend(context.Background(), a, sendTextRequest(typed))
+	if err != nil || !first.Sent || first.AlreadySent {
+		t.Fatalf("first = %+v err=%v", first, err)
+	}
+	if first.To != "551187654321@s.whatsapp.net" {
+		t.Fatalf("the send was not stored under the rewritten JID: %+v", first)
+	}
+	second, err := executeDelegatedSend(context.Background(), a, sendTextRequest(typed))
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if !second.AlreadySent || second.To != "551187654321@s.whatsapp.net" || second.TargetMismatch == "" {
+		t.Fatalf("retry = %+v, want already_sent to the stored chat with a target_mismatch warning", second)
+	}
+	if len(f.sendTexts) != 1 {
+		t.Fatalf("the text went out %d times", len(f.sendTexts))
 	}
 }
 

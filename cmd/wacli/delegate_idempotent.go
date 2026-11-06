@@ -18,10 +18,15 @@ var kindStoresSentMessage = map[string]bool{
 }
 
 // alreadySentResponse makes a retry with the same --id safe. Before anything
-// goes on the wire it looks the id up among this account's sent messages. A
-// hit in the target chat answers "already sent" with that id and sends nothing.
-// A hit in another chat is an error: the id is spent. done is true when the
-// request is answered here.
+// goes on the wire it looks the id up among this account's sent messages. The
+// id is chosen by the caller, once per action, so a from-me hit ANYWHERE means
+// this action was already sent: answer "already sent" with the stored chat and
+// send nothing. The stored chat can differ from the typed recipient, because a
+// send stores under the JID WhatsApp's registration check returned (a Brazilian
+// 55119XXXXXXXX becomes 5511XXXXXXXX). Then the answer carries a
+// target_mismatch warning; it never tells the caller to pick another id, since
+// a fresh id would send the same text twice. done is true when the request is
+// answered here.
 func alreadySentResponse(ctx context.Context, a *app.App, req sendDelegateRequest) (sendDelegateResponse, bool, error) {
 	if req.NewID == "" || !kindStoresSentMessage[req.Kind] || a == nil || a.DB() == nil {
 		return sendDelegateResponse{}, false, nil
@@ -33,27 +38,30 @@ func alreadySentResponse(ctx context.Context, a *app.App, req sendDelegateReques
 	if !found {
 		return sendDelegateResponse{}, false, nil
 	}
-	target := strings.TrimSpace(req.To)
-	chats, ferr := messageChatJIDFilter(ctx, a, target)
-	if target == "" || ferr != nil {
-		// The target cannot be resolved here; the id is stored, so do not resend.
-		chats = []string{foundChat}
-	}
-	inTarget := false
-	for _, c := range chats {
-		if c == foundChat {
-			inTarget = true
-		}
-	}
-	if !inTarget {
-		return sendDelegateResponse{}, false, fmt.Errorf("message id %s was already used for a message in %s, not %s; choose another id", req.NewID, foundChat, target)
-	}
 	resp := sendDelegateResponse{OK: true, Sent: true, AlreadySent: true, To: foundChat, ID: req.NewID}
+	if target := strings.TrimSpace(req.To); target != "" && !chatMatchesTarget(ctx, a, foundChat, target) {
+		resp.TargetMismatch = fmt.Sprintf("message id %s was sent to %s, not to the typed recipient %s", req.NewID, foundChat, target)
+	}
 	if req.Kind == forwardKind {
 		raw, _ := json.Marshal(forwardResult{Forwarded: true, To: foundChat, ID: req.NewID, Source: req.ID})
 		resp.Data = raw
 	}
 	return resp, true, nil
+}
+
+// chatMatchesTarget reports whether the stored chat is the typed recipient or
+// its PN/LID twin. A false answer only adds a warning.
+func chatMatchesTarget(ctx context.Context, a *app.App, storedChat, target string) bool {
+	chats, err := messageChatJIDFilter(ctx, a, target)
+	if err != nil {
+		return false
+	}
+	for _, c := range chats {
+		if c == storedChat {
+			return true
+		}
+	}
+	return false
 }
 
 // localAlreadySent is the same check for a command that runs on its own
