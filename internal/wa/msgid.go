@@ -2,8 +2,10 @@ package wa
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"sync/atomic"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -45,4 +47,55 @@ func sendExtras(ctx context.Context, mediaHandle string) []whatsmeow.SendRequest
 		return nil
 	}
 	return []whatsmeow.SendRequestExtra{{ID: id, MediaHandle: mediaHandle}}
+}
+
+// SendPhase records whether a send reached the wire. SendMessage builds the
+// frame, encrypts and writes it in one call, so the mark is set right before
+// that call: an error from anything earlier (upload, recipient lookup, a
+// missing connection) is definite, and an error after the mark may have come
+// from a frame the server already has.
+type SendPhase struct {
+	dispatched atomic.Bool
+}
+
+// Dispatched reports whether the send reached the point of no return.
+func (p *SendPhase) Dispatched() bool { return p != nil && p.dispatched.Load() }
+
+type sendPhaseKey struct{}
+
+// WithSendPhase returns a context carrying a fresh SendPhase, and the phase.
+func WithSendPhase(ctx context.Context) (context.Context, *SendPhase) {
+	p := &SendPhase{}
+	return context.WithValue(ctx, sendPhaseKey{}, p), p
+}
+
+// MarkDispatched is called just before a message is handed to the wire. The real
+// client does it inside its send methods; a fake client calls it to model the
+// same point.
+func MarkDispatched(ctx context.Context) { markDispatched(ctx) }
+
+// markDispatched is called by the client just before it hands a message to
+// whatsmeow.
+func markDispatched(ctx context.Context) {
+	if p, ok := ctx.Value(sendPhaseKey{}).(*SendPhase); ok {
+		p.dispatched.Store(true)
+	}
+}
+
+// ErrorAfterDispatchIsUnknown reports whether err, raised after the dispatch
+// mark, leaves it open that the server received the message. The server's own
+// error reply is definite: it answered. Everything else (a dropped websocket, a
+// timeout waiting for the ack, a cancelled context) is not.
+func ErrorAfterDispatchIsUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, whatsmeow.ErrServerReturnedError) {
+		return false
+	}
+	var iqErr *whatsmeow.IQError
+	if errors.As(err, &iqErr) {
+		return false
+	}
+	return true
 }

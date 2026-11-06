@@ -22,6 +22,7 @@ func (c *Client) SendText(ctx context.Context, to types.JID, text string) (types
 		return "", fmt.Errorf("not connected")
 	}
 	msg := &waProto.Message{Conversation: &text}
+	markDispatched(ctx)
 	resp, err := cli.SendMessage(ctx, to, msg, sendExtras(ctx, "")...)
 	if err != nil {
 		return "", err
@@ -40,6 +41,7 @@ func (c *Client) SendProtoMessageWithExtra(ctx context.Context, to types.JID, ms
 	if cli == nil || !cli.IsConnected() {
 		return "", fmt.Errorf("not connected")
 	}
+	markDispatched(ctx)
 	resp, err := cli.SendMessage(ctx, to, msg, sendExtras(ctx, mediaHandle)...)
 	if err != nil {
 		return "", err
@@ -54,6 +56,7 @@ func (c *Client) SendReaction(ctx context.Context, chat, sender types.JID, targe
 	if cli == nil || !cli.IsConnected() {
 		return "", fmt.Errorf("not connected")
 	}
+	markDispatched(ctx)
 	resp, err := cli.SendMessage(ctx, chat, cli.BuildReaction(chat, sender, targetID, reaction), sendExtras(ctx, "")...)
 	if err != nil {
 		return "", err
@@ -68,6 +71,7 @@ func (c *Client) RevokeMessage(ctx context.Context, chat types.JID, targetID typ
 	if cli == nil || !cli.IsConnected() {
 		return "", fmt.Errorf("not connected")
 	}
+	markDispatched(ctx)
 	resp, err := cli.SendMessage(ctx, chat, cli.BuildRevoke(chat, types.EmptyJID, targetID), sendExtras(ctx, "")...)
 	if err != nil {
 		return "", err
@@ -120,6 +124,7 @@ func (c *Client) EditMessage(ctx context.Context, chat types.JID, targetID types
 		return "", fmt.Errorf("not connected")
 	}
 	msg := &waE2E.Message{Conversation: proto.String(text)}
+	markDispatched(ctx)
 	resp, err := cli.SendMessage(ctx, chat, cli.BuildEdit(chat, targetID, msg), sendExtras(ctx, "")...)
 	if err != nil {
 		return "", err
