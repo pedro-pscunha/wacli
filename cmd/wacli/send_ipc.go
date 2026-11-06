@@ -108,6 +108,7 @@ type sendDelegateRequest struct {
 	WaitMS       int64    `json:"wait_ms,omitempty"`
 	Limit        int      `json:"limit,omitempty"`
 	Workers      int      `json:"workers,omitempty"`
+	IdleExitMS   int64    `json:"idle_exit_ms,omitempty"`
 	// Strict makes revoke fail on a message the store does not know.
 	Strict bool `json:"strict,omitempty"`
 }

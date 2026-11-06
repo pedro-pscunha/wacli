@@ -162,27 +162,14 @@ func newMediaBackfillCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
+			if err := validateDelegateRequest(sendDelegateRequest{Kind: mediaBackfillKind, Chat: chat, Limit: limit, Workers: workers}); err != nil {
+				return err
+			}
 			ctx, cancel := mediaBulkContext(cmd, flags)
 			defer cancel()
+			f := bulkTimeout(cmd, flags, 6*time.Hour)
 
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-
-			res, err := a.BackfillMedia(ctx, app.BackfillMediaOptions{
-				ChatJID: chat,
-				Limit:   limit,
-				Workers: workers,
-			})
+			res, err := callKind[mediaBackfillResult](ctx, f, sendDelegateRequest{Kind: mediaBackfillKind, Chat: chat, Limit: limit, Workers: workers})
 			if err != nil {
 				return err
 			}

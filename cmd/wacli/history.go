@@ -143,21 +143,21 @@ func newHistoryBackfillCmd(flags *rootFlags) *cobra.Command {
 				return err
 			}
 
-			ctx, stop := signalContextWithEvents(out.NewEventWriter(os.Stderr, flags.events))
-			defer stop()
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
+			if err := validateDelegateRequest(sendDelegateRequest{Kind: historyBackfillKind, Chat: chat, Count: count, Requests: requests, WaitMS: wait.Milliseconds(), IdleExitMS: idleExit.Milliseconds()}); err != nil {
 				return err
 			}
-			defer closeApp(a, lk)
+			ctx, stop := signalContextWithEvents(out.NewEventWriter(os.Stderr, flags.events))
+			defer stop()
+			req := requests
+			if req <= 0 {
+				req = app.DefaultBackfillRequests
+			}
+			// Each request may wait twice (a retry after a timeout), plus the sync's own setup.
+			f := bulkTimeout(cmd, flags, time.Duration(req)*2*wait+5*time.Minute)
 
-			res, err := a.BackfillHistory(ctx, app.BackfillOptions{
-				ChatJID:        chat,
-				Count:          count,
-				Requests:       requests,
-				WaitPerRequest: wait,
-				IdleExit:       idleExit,
+			res, err := callKind[historyBackfillResult](ctx, f, sendDelegateRequest{
+				Kind: historyBackfillKind, Chat: chat, Count: count, Requests: requests,
+				WaitMS: wait.Milliseconds(), IdleExitMS: idleExit.Milliseconds(),
 			})
 			if err != nil {
 				return err
@@ -165,7 +165,7 @@ func newHistoryBackfillCmd(flags *rootFlags) *cobra.Command {
 
 			if flags.asJSON {
 				return out.WriteJSON(os.Stdout, map[string]any{
-					"chat":            res.ChatJID,
+					"chat":            res.Chat,
 					"requests_sent":   res.RequestsSent,
 					"responses_seen":  res.ResponsesSeen,
 					"messages_added":  res.MessagesAdded,
@@ -173,7 +173,7 @@ func newHistoryBackfillCmd(flags *rootFlags) *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(os.Stdout, "Backfill complete for %s. Added %d messages (%d requests).\n", res.ChatJID, res.MessagesAdded, res.RequestsSent)
+			fmt.Fprintf(os.Stdout, "Backfill complete for %s. Added %d messages (%d requests).\n", res.Chat, res.MessagesAdded, res.RequestsSent)
 			return nil
 		},
 	}

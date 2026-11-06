@@ -46,33 +46,40 @@ type onDemandResponse struct {
 	endType       waHistorySync.Conversation_EndOfHistoryTransferType
 }
 
-func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (BackfillResult, error) {
+func (a *App) prepareBackfill(ctx context.Context, opts BackfillOptions) (types.JID, BackfillOptions, error) {
 	chatStr := strings.TrimSpace(opts.ChatJID)
 	if chatStr == "" {
-		return BackfillResult{}, fmt.Errorf("--chat is required")
+		return types.JID{}, opts, fmt.Errorf("--chat is required")
 	}
 	chat, err := types.ParseJID(chatStr)
 	if err != nil {
-		return BackfillResult{}, fmt.Errorf("parse chat JID: %w", err)
+		return types.JID{}, opts, fmt.Errorf("parse chat JID: %w", err)
 	}
-	chatStr = chat.String()
-
 	opts = normalizeBackfillOptions(opts)
 	if err := validateBackfillOptions(opts); err != nil {
-		return BackfillResult{}, err
+		return types.JID{}, opts, err
 	}
-
 	if err := a.EnsureAuthed(ctx); err != nil {
-		return BackfillResult{}, err
+		return types.JID{}, opts, err
 	}
 	if err := a.OpenWA(); err != nil {
-		return BackfillResult{}, err
+		return types.JID{}, opts, err
 	}
-	a.wa.SetManualHistorySyncDownload(true)
-	defer a.wa.SetManualHistorySyncDownload(false)
+	return chat, opts, nil
+}
 
-	beforeCount, _ := a.db.CountMessages()
+// backfillRunner holds the on-demand request loop. BackfillHistory drives it
+// from a one-shot sync, BackfillHistoryLive from an already connected daemon.
+type backfillRunner struct {
+	handleOnDemand func(*events.HistorySync)
+	run            func(ctx context.Context) error
+	cleanup        func()
+	requestsSent   *int
+	responsesSeen  *int
+	stored         *atomic.Int64
+}
 
+func (a *App) newBackfillRunner(ctx context.Context, opts BackfillOptions, chat types.JID) *backfillRunner {
 	var mu sync.Mutex
 	var waitCh chan onDemandResponse
 	var manualMessagesStored atomic.Int64
@@ -128,10 +135,10 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 			handleOnDemand(hs)
 		}
 	})
-	defer a.wa.RemoveEventHandler(handlerID)
+	cleanup := func() { a.wa.RemoveEventHandler(handlerID) }
 
-	var requestsSent int
-	var responsesSeen int
+	requestsSent := new(int)
+	responsesSeen := new(int)
 	errResponseTimeout := errors.New("timed out waiting for on-demand history sync response")
 	request := func(ctx context.Context, anchor store.MessageInfo, requestChat types.JID) (onDemandResponse, error) {
 		if err := ctx.Err(); err != nil {
@@ -148,12 +155,12 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 		}()
 
 		storeChat := a.canonicalStoreJID(ctx, chat).String()
-		requestsSent++
+		*requestsSent++
 		a.emitOrPrint("backfill_requesting", map[string]any{
 			"chat_jid":         storeChat,
 			"request_chat_jid": requestChat.String(),
 			"count":            opts.Count,
-			"request":          requestsSent,
+			"request":          *requestsSent,
 			"anchor_msg_id":    anchor.MsgID,
 		}, "Requesting %d older messages for %s...\n", opts.Count, storeChat)
 		reqInfo := types.MessageInfo{
@@ -170,7 +177,7 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 		case <-ctx.Done():
 			return onDemandResponse{}, ctx.Err()
 		case resp := <-ch:
-			responsesSeen++
+			*responsesSeen++
 			return resp, nil
 		case <-timer.C:
 			return onDemandResponse{}, fmt.Errorf("%w (anchor %s)", errResponseTimeout, anchor.MsgID)
@@ -217,12 +224,13 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 		return resp, err
 	}
 
-	syncRes, err := a.Sync(ctx, SyncOptions{
-		Mode:             SyncModeOnce,
-		AllowQR:          false,
-		IdleExit:         opts.IdleExit,
-		afterHistorySync: handleOnDemand,
-		AfterConnect: func(ctx context.Context) error {
+	return &backfillRunner{
+		handleOnDemand: handleOnDemand,
+		cleanup:        cleanup,
+		requestsSent:   requestsSent,
+		responsesSeen:  responsesSeen,
+		stored:         &manualMessagesStored,
+		run: func(ctx context.Context) error {
 			// Sync can learn mappings and migrate old LID rows while connecting.
 			// Resolve the local identity only after that migration has completed.
 			chatStr := a.canonicalStoreJID(ctx, chat).String()
@@ -256,7 +264,7 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 					"chat_jid":       chatStr,
 					"conversations":  resp.conversations,
 					"messages":       resp.messages,
-					"responses_seen": responsesSeen,
+					"responses_seen": *responsesSeen,
 				}, "On-demand history sync: %d conversations, %d messages.\n", resp.conversations, resp.messages)
 
 				newOldest, err := a.db.GetOldestMessageInfo(chatStr)
@@ -285,6 +293,27 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 			}
 			return nil
 		},
+	}
+}
+
+func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (BackfillResult, error) {
+	chat, opts, err := a.prepareBackfill(ctx, opts)
+	if err != nil {
+		return BackfillResult{}, err
+	}
+	a.wa.SetManualHistorySyncDownload(true)
+	defer a.wa.SetManualHistorySyncDownload(false)
+
+	beforeCount, _ := a.db.CountMessages()
+	r := a.newBackfillRunner(ctx, opts, chat)
+	defer r.cleanup()
+
+	syncRes, err := a.Sync(ctx, SyncOptions{
+		Mode:             SyncModeOnce,
+		AllowQR:          false,
+		IdleExit:         opts.IdleExit,
+		afterHistorySync: r.handleOnDemand,
+		AfterConnect:     r.run,
 	})
 	if err != nil {
 		return BackfillResult{}, err
@@ -294,11 +323,52 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
 
 	return BackfillResult{
 		ChatJID:        a.canonicalStoreJID(ctx, chat).String(),
-		RequestsSent:   requestsSent,
-		ResponsesSeen:  responsesSeen,
+		RequestsSent:   *r.requestsSent,
+		ResponsesSeen:  *r.responsesSeen,
 		MessagesAdded:  afterCount - beforeCount,
 		MessagesSynced: syncRes.MessagesStored,
 	}, nil
+}
+
+// BackfillHistoryLive requests older messages on the connection the caller
+// already holds, which is how the sync daemon repairs a gap without a second
+// session. Messages are stored through the normal history-sync path. The
+// caller must be the connected sync process, which already downloads history
+// payloads manually.
+func (a *App) BackfillHistoryLive(ctx context.Context, opts BackfillOptions) (BackfillResult, error) {
+	chat, opts, err := a.prepareBackfill(ctx, opts)
+	if err != nil {
+		return BackfillResult{}, err
+	}
+	if !a.wa.IsConnected() {
+		return BackfillResult{}, errors.New("not connected")
+	}
+	beforeCount, _ := a.db.CountMessages()
+	r := a.newBackfillRunner(ctx, opts, chat)
+	defer r.cleanup()
+	if err := r.run(ctx); err != nil {
+		return BackfillResult{}, err
+	}
+	afterCount, _ := a.db.CountMessages()
+	return BackfillResult{
+		ChatJID:        a.canonicalStoreJID(ctx, chat).String(),
+		RequestsSent:   *r.requestsSent,
+		ResponsesSeen:  *r.responsesSeen,
+		MessagesAdded:  afterCount - beforeCount,
+		MessagesSynced: r.stored.Load(),
+	}, nil
+}
+
+// ValidateBackfillRequest checks a backfill request the way BackfillHistory
+// does, without touching the store or the network.
+func ValidateBackfillRequest(opts BackfillOptions) error {
+	if strings.TrimSpace(opts.ChatJID) == "" {
+		return fmt.Errorf("--chat is required")
+	}
+	if _, err := types.ParseJID(strings.TrimSpace(opts.ChatJID)); err != nil {
+		return fmt.Errorf("parse chat JID: %w", err)
+	}
+	return validateBackfillOptions(normalizeBackfillOptions(opts))
 }
 
 func normalizeBackfillOptions(opts BackfillOptions) BackfillOptions {

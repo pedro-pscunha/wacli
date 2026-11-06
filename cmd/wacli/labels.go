@@ -231,32 +231,14 @@ func mergeLabelChats(chats []labelChat, toPhone func(types.JID) string, name fun
 }
 
 func runLabelsList(flags *rootFlags) error {
-	if err := flags.requireWritable(); err != nil {
-		return err
-	}
-
 	ctx, cancel := withTimeout(context.Background(), flags)
 	defer cancel()
 
-	a, lk, err := newApp(ctx, flags, true, false)
+	res, err := callKind[labelsListResult](ctx, flags, sendDelegateRequest{Kind: labelsListKind})
 	if err != nil {
 		return err
 	}
-	defer closeApp(a, lk)
-
-	if err := a.EnsureAuthed(ctx); err != nil {
-		return err
-	}
-	if err := a.Connect(ctx, false, nil); err != nil {
-		return err
-	}
-
-	mutations, err := a.ReadLabelMutations(ctx)
-	if err != nil {
-		return err
-	}
-	rows := collectLabels(mutations)
-	resolveLabelChatNames(ctx, a, rows)
+	rows := res.Labels
 
 	if flags.asJSON {
 		return out.WriteJSON(os.Stdout, rows)

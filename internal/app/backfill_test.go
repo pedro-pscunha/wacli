@@ -389,3 +389,57 @@ func storeUpsertMessage(chatJID, id string, ts time.Time, text string) store.Ups
 		Text:       text,
 	}
 }
+
+// A live backfill runs on the connection the daemon already holds: it must
+// request older messages, store them through the normal history path, and
+// never connect, disconnect or toggle the manual-download mode itself.
+func TestBackfillHistoryLiveStoresMessagesWithoutConnecting(t *testing.T) {
+	a, f, chat, base := newBackfillRetryTest(t, "anchor")
+	f.mu.Lock()
+	f.connected = true
+	f.mu.Unlock()
+	// With manual download on, the daemon receives a notification, not the
+	// data: the live handler downloads it and stores it as a sync would.
+	syncType := waE2E.HistorySyncType_ON_DEMAND
+	notif := &waE2E.HistorySyncNotification{SyncType: &syncType}
+	f.onDemandEvent = func(info types.MessageInfo, count int) any {
+		return &events.Message{Message: &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{HistorySyncNotification: notif}}}
+	}
+	f.downloadHistory = func(*waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
+		return backfillTestResponse(chat, "older-live", base.Add(-time.Second)).Data, nil
+	}
+	res, err := a.BackfillHistoryLive(context.Background(), backfillRetryOptions(chat))
+	if err != nil {
+		t.Fatalf("BackfillHistoryLive: %v", err)
+	}
+	if res.RequestsSent != 1 || res.ResponsesSeen != 1 || res.MessagesAdded != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	if oldest, err := a.db.GetOldestMessageInfo(chat); err != nil || oldest.MsgID != "older-live" {
+		t.Fatalf("oldest = %+v, err = %v", oldest, err)
+	}
+	if f.connectCalls != 0 {
+		t.Fatalf("live backfill connected %d times", f.connectCalls)
+	}
+	if len(f.manualHistorySyncCalls) != 0 {
+		t.Fatalf("live backfill changed the manual download mode: %v", f.manualHistorySyncCalls)
+	}
+}
+
+func TestBackfillHistoryLiveRefusesWhenNotConnected(t *testing.T) {
+	a, _, chat, _ := newBackfillRetryTest(t, "anchor")
+	if _, err := a.BackfillHistoryLive(context.Background(), backfillRetryOptions(chat)); err == nil || !strings.Contains(err.Error(), "not connected") {
+		t.Fatalf("err = %v, want not connected", err)
+	}
+}
+
+func TestValidateBackfillRequest(t *testing.T) {
+	if ValidateBackfillRequest(BackfillOptions{ChatJID: "123@g.us"}) != nil {
+		t.Fatal("a plain request is valid")
+	}
+	for _, bad := range []BackfillOptions{{}, {ChatJID: "123@g.us", Count: MaxBackfillCount + 1}, {ChatJID: "123@g.us", Requests: MaxBackfillRequests + 1}} {
+		if ValidateBackfillRequest(bad) == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+}

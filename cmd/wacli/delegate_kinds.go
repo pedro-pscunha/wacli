@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/openclaw/wacli/internal/app"
-	"github.com/openclaw/wacli/internal/wa"
 )
 
 // A registered kind is a command that must run on the daemon's connection when
@@ -158,5 +157,3 @@ func validateTargetMessageID(flag, id string) error {
 	}
 	return nil
 }
-
-var _ = wa.ValidateMessageID
