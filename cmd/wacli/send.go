@@ -117,6 +117,11 @@ func newSendTextCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
+			if newMsgID != "" {
+				if done, err := localAlreadySent(ctx, flags, a, "text", to, newMsgID); err != nil || done {
+					return err
+				}
+			}
 
 			toJID, err := resolveRecipient(a, to, recipientOptions{pick: pick, asJSON: flags.asJSON})
 			if err != nil {

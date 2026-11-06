@@ -136,6 +136,9 @@ type sendDelegateResponse struct {
 	Media          *mediaDownloadResult  `json:"media,omitempty"`
 	Devices        []wa.OwnDevice        `json:"devices,omitempty"`
 	Capabilities   *delegateCapabilities `json:"capabilities,omitempty"`
+	// AlreadySent means a message with the requested --id was already sent and
+	// stored, so nothing went on the wire this time. ID is that message.
+	AlreadySent bool `json:"already_sent,omitempty"`
 	// Data carries the typed result of the kinds added after protocol 1 began.
 	Data json.RawMessage `json:"data,omitempty"`
 }
@@ -490,6 +493,9 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 	}
 	if err := validateDelegateRequest(req); err != nil {
 		return sendDelegateResponse{}, err
+	}
+	if resp, done, err := alreadySentResponse(ctx, a, req); err != nil || done {
+		return resp, err
 	}
 
 	switch req.Kind {

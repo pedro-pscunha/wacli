@@ -127,6 +127,15 @@ func callKind[T any](ctx context.Context, flags *rootFlags, req sendDelegateRequ
 	if err := a.EnsureAuthed(ctx); err != nil {
 		return zero, err
 	}
+	if resp, done, err := alreadySentResponse(ctx, a, req); err != nil {
+		return zero, err
+	} else if done {
+		var cached T
+		if len(resp.Data) > 0 {
+			_ = json.Unmarshal(resp.Data, &cached)
+		}
+		return cached, nil
+	}
 	res, err := h.run(ctx, a, req)
 	if err != nil {
 		return zero, err

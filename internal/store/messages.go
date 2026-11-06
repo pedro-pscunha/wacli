@@ -758,3 +758,21 @@ func messageInfoFromLatestRow(row storedb.GetLatestMessageInfoRow) MessageInfo {
 		SenderName: row.SenderName,
 	}
 }
+
+// FindOwnMessage returns the chat of a message this account sent with msgID.
+// WhatsApp message IDs are random per sender, so one ID names one sent message.
+// ok is false when no such message is stored.
+func (d *DB) FindOwnMessage(msgID string) (chatJID string, ok bool, err error) {
+	msgID = strings.TrimSpace(msgID)
+	if msgID == "" {
+		return "", false, fmt.Errorf("message ID is required")
+	}
+	err = d.sql.QueryRow(`SELECT chat_jid FROM messages WHERE msg_id = ? AND from_me = 1 LIMIT 1`, msgID).Scan(&chatJID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return chatJID, true, nil
+}

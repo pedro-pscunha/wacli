@@ -65,6 +65,11 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
 			if err := a.EnsureAuthed(ctx); err != nil {
 				return err
 			}
+			if newMsgID != "" {
+				if done, err := localAlreadySent(ctx, flags, a, "react", to, newMsgID); err != nil || done {
+					return err
+				}
+			}
 			if err := a.Connect(ctx, false, nil); err != nil {
 				return err
 			}
