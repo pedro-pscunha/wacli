@@ -285,7 +285,13 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 	// Handlers get their own context so stop can cancel them, and a wait group
 	// so stop can wait for them: closing the database under a running backfill
 	// would corrupt its last writes.
-	hctx, hcancel := context.WithCancel(ctx)
+	//
+	// The handlers' context must outlive the sync: Sync cancels its own context
+	// before the command's deferred stop runs, so a context derived from it would
+	// already be cancelled when stop starts, and "let in-flight requests finish"
+	// would be false. WithoutCancel keeps its values and drops its cancellation;
+	// only stop cancels the handlers, after the grace period.
+	hctx, hcancel := context.WithCancel(context.WithoutCancel(ctx))
 	var handlers sync.WaitGroup
 	go func() {
 		defer close(done)

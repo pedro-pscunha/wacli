@@ -170,3 +170,51 @@ func TestStopWaitsForInFlightHandlers(t *testing.T) {
 		t.Fatal("stop did not return after the request finished")
 	}
 }
+
+// m-f: the server outlives the context it was started with. Cancelling the
+// starting context (as Sync does when it ends) must not cancel a request in
+// flight: only stop does, after the grace period.
+func TestInFlightRequestSurvivesCancellationOfTheStartingContext(t *testing.T) {
+	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
+	storeDir := shortPresenceDelegateStoreDir(t)
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var ctxErrAtFinish error
+	stop, err := startSendDelegateServerForStore(startCtx, storeDir, sendSpacing{}, func(ctx context.Context, req sendDelegateRequest) (sendDelegateResponse, error) {
+		close(started)
+		<-release
+		ctxErrAtFinish = ctx.Err()
+		return sendDelegateResponse{OK: true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("unix", sendDelegateSocketPath(storeDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(sendDelegateRequest{Version: sendDelegateVersion, Kind: "text", TimeoutMS: 20000}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	cancelStart() // Sync ending
+	time.Sleep(100 * time.Millisecond)
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stop did not return")
+	}
+	if ctxErrAtFinish != nil {
+		t.Fatalf("the request was cancelled by the starting context: %v", ctxErrAtFinish)
+	}
+	var resp sendDelegateResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil || !resp.OK {
+		t.Fatalf("the in-flight request got no answer: %+v err=%v", resp, err)
+	}
+}
