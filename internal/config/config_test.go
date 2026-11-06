@@ -198,3 +198,53 @@ func TestValidateAccountName(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreIsDelegateOnlyResolvesSymlinks(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	cfgPath := filepath.Join(base, "config.yaml")
+	cfg := &AccountsConfig{Accounts: map[string]AccountEntry{"w": {Store: real, DelegateOnly: true}}}
+	if err := SaveAccountsConfig(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !StoreIsDelegateOnly(link, cfgPath) {
+		t.Fatal("a --store path through a symlink missed the config pin")
+	}
+	if StoreIsDelegateOnly(filepath.Join(base, "elsewhere"), cfgPath) {
+		t.Fatal("an unrelated store was pinned")
+	}
+}
+
+func TestStoreIsDelegateOnlyFailsClosedOnUnreadableMarker(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	base := t.TempDir()
+	store := filepath.Join(base, "s")
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, DelegateOnlyMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(store, 0o700)
+	if !StoreIsDelegateOnly(store, filepath.Join(base, "none.yaml")) {
+		t.Fatal("an unreadable store directory must count as pinned")
+	}
+	// A store that simply has no marker is not pinned.
+	free := filepath.Join(base, "free")
+	_ = os.MkdirAll(free, 0o700)
+	if StoreIsDelegateOnly(free, filepath.Join(base, "none.yaml")) {
+		t.Fatal("a store without a marker was pinned")
+	}
+}

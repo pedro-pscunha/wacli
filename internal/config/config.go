@@ -267,17 +267,29 @@ const DelegateOnlyMarker = ".delegate-only"
 
 // StoreIsDelegateOnly reports whether storeDir is pinned to the sync daemon:
 // it holds a DelegateOnlyMarker file, or the account config marks the account
-// that owns it with delegate_only. A missing or unreadable config is not an
-// error here: the marker still applies.
+// that owns it with delegate_only.
+//
+// It fails closed on the marker: a Stat error other than "does not exist"
+// (permission denied, an I/O error) counts as pinned, because the store cannot
+// be proven free. An unparsable config.yaml counts as not pinned here, since
+// every command that resolves an account already fails on it.
 func StoreIsDelegateOnly(storeDir, configPath string) bool {
-	if info, err := os.Stat(filepath.Join(storeDir, DelegateOnlyMarker)); err == nil && !info.IsDir() {
+	info, err := os.Stat(filepath.Join(storeDir, DelegateOnlyMarker))
+	switch {
+	case err == nil:
+		if !info.IsDir() {
+			return true
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		// Permission denied, I/O error, a path component that is not a directory:
+		// we cannot prove the store is free, so treat it as pinned.
 		return true
 	}
 	cfg, found, err := LoadAccountsConfigIfExists(configPath)
 	if err != nil || !found {
 		return false
 	}
-	want, _ := filepath.Abs(storeDir)
+	want := canonicalStorePath(storeDir)
 	for name, entry := range cfg.Accounts {
 		if !entry.DelegateOnly {
 			continue
@@ -286,9 +298,22 @@ func StoreIsDelegateOnly(storeDir, configPath string) bool {
 		if err != nil {
 			continue
 		}
-		if got, _ := filepath.Abs(resolved); got == want {
+		if canonicalStorePath(resolved) == want {
 			return true
 		}
 	}
 	return false
+}
+
+// canonicalStorePath makes two spellings of one directory compare equal:
+// absolute, with symbolic links resolved when the directory exists.
+func canonicalStorePath(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
 }
