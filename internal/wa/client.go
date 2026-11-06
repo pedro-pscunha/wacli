@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -647,4 +648,51 @@ func (c *Client) ReconnectWithBackoff(ctx context.Context, minDelay, maxDelay ti
 			delay = maxDelay
 		}
 	}
+}
+
+// OwnDevice is one device linked to the account. WhatsApp's device query gives
+// the device number only; the platform and push name are known for this
+// process's own device alone, and no last-seen time is available.
+type OwnDevice struct {
+	JID      string `json:"jid"`
+	Device   int    `json:"device"`
+	Self     bool   `json:"self,omitempty"`
+	Platform string `json:"platform,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+// OwnDevices lists the devices linked to this account: the primary phone
+// (device 0) and every companion, including this one. It queries WhatsApp.
+func (c *Client) OwnDevices(ctx context.Context) ([]OwnDevice, error) {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil || !cli.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+	if cli.Store == nil || cli.Store.ID == nil {
+		return nil, fmt.Errorf("not authenticated")
+	}
+	self := *cli.Store.ID
+	others, err := cli.GetUserDevices(ctx, []types.JID{self.ToNonAD()})
+	if err != nil {
+		return nil, fmt.Errorf("query linked devices: %w", err)
+	}
+	return mergeOwnDevices(self, cli.Store.Platform, cli.Store.PushName, others), nil
+}
+
+// mergeOwnDevices builds the sorted device list. GetUserDevices leaves the
+// local device out, so it is added from the store.
+func mergeOwnDevices(self types.JID, platform, name string, others []types.JID) []OwnDevice {
+	list := []OwnDevice{{JID: self.String(), Device: int(self.Device), Self: true, Platform: platform, Name: name}}
+	seen := map[int]bool{int(self.Device): true}
+	for _, d := range others {
+		if seen[int(d.Device)] {
+			continue
+		}
+		seen[int(d.Device)] = true
+		list = append(list, OwnDevice{JID: d.String(), Device: int(d.Device)})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Device < list[j].Device })
+	return list
 }

@@ -88,26 +88,28 @@ type sendDelegateRequest struct {
 }
 
 type sendDelegateResponse struct {
-	OK             bool                 `json:"ok"`
-	Error          string               `json:"error,omitempty"`
-	Sent           bool                 `json:"sent,omitempty"`
-	To             string               `json:"to,omitempty"`
-	ID             string               `json:"id,omitempty"`
-	Target         string               `json:"target,omitempty"`
-	Reaction       string               `json:"reaction,omitempty"`
-	Question       string               `json:"question,omitempty"`
-	Options        []string             `json:"options,omitempty"`
-	Selected       []string             `json:"selected,omitempty"`
-	SelectedOption *selectOption        `json:"selected_option,omitempty"`
-	File           map[string]string    `json:"file,omitempty"`
-	StoreWarning   string               `json:"store_warning,omitempty"`
-	Chat           string               `json:"chat,omitempty"`
-	Action         string               `json:"action,omitempty"`
-	Receipts       *int                 `json:"receipts,omitempty"`
-	ReceiptType    string               `json:"receipt_type,omitempty"`
-	Contacts       []contactCheckResult `json:"contacts,omitempty"`
-	Presence       *app.PresenceState   `json:"presence,omitempty"`
-	Media          *mediaDownloadResult `json:"media,omitempty"`
+	OK             bool                  `json:"ok"`
+	Error          string                `json:"error,omitempty"`
+	Sent           bool                  `json:"sent,omitempty"`
+	To             string                `json:"to,omitempty"`
+	ID             string                `json:"id,omitempty"`
+	Target         string                `json:"target,omitempty"`
+	Reaction       string                `json:"reaction,omitempty"`
+	Question       string                `json:"question,omitempty"`
+	Options        []string              `json:"options,omitempty"`
+	Selected       []string              `json:"selected,omitempty"`
+	SelectedOption *selectOption         `json:"selected_option,omitempty"`
+	File           map[string]string     `json:"file,omitempty"`
+	StoreWarning   string                `json:"store_warning,omitempty"`
+	Chat           string                `json:"chat,omitempty"`
+	Action         string                `json:"action,omitempty"`
+	Receipts       *int                  `json:"receipts,omitempty"`
+	ReceiptType    string                `json:"receipt_type,omitempty"`
+	Contacts       []contactCheckResult  `json:"contacts,omitempty"`
+	Presence       *app.PresenceState    `json:"presence,omitempty"`
+	Media          *mediaDownloadResult  `json:"media,omitempty"`
+	Devices        []wa.OwnDevice        `json:"devices,omitempty"`
+	Capabilities   *delegateCapabilities `json:"capabilities,omitempty"`
 }
 
 type sendDelegateExecutor func(context.Context, sendDelegateRequest) (sendDelegateResponse, error)
@@ -328,6 +330,16 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
 		_ = json.NewEncoder(conn).Encode(resp)
 		return
 	}
+	if isReadOnlyDelegateKind(req.Kind) {
+		// These kinds only read: they neither queue behind sends nor take a
+		// paced send slot, and a stalled send must not hide the daemon.
+		resp, err := execute(requestCtx, req)
+		if err != nil {
+			resp = sendDelegateResponse{OK: false, Error: err.Error()}
+		}
+		_ = json.NewEncoder(conn).Encode(resp)
+		return
+	}
 	if isAppStateKind(req.Kind) {
 		// App-state writes are serialized by the app and can wait minutes on
 		// recovery, so they must not hold the send queue.
@@ -428,6 +440,10 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
 		}
 		result, err := executeExactMediaDownload(ctx, a, req.To, req.ID, req.RetryOnPhone)
 		return sendDelegateResponse{OK: err == nil, Media: result}, err
+	case capabilitiesKind:
+		return executeDelegatedCapabilities()
+	case devicesKind:
+		return executeDelegatedDevices(ctx, a)
 	case "text":
 		return executeDelegatedText(ctx, a, req)
 	case "file", "voice":

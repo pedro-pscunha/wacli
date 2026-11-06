@@ -31,6 +31,8 @@ type fakeWA struct {
 	connected     bool
 	autoReconnect bool
 	linkedLID     string
+	ownDevices    []wa.OwnDevice
+	ownDevicesErr error
 
 	nextHandlerID uint32
 	handlers      map[uint32]func(any)
@@ -1035,6 +1037,10 @@ func (f *fakeWA) LinkedJID() string {
 		return ""
 	}
 	return "1234567890@s.whatsapp.net"
+}
+
+func (f *fakeWA) OwnDevices(ctx context.Context) ([]wa.OwnDevice, error) {
+	return f.ownDevices, f.ownDevicesErr
 }
 
 func (f *fakeWA) LinkedLID() string {

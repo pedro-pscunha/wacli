@@ -105,6 +105,8 @@ func execute(args []string) error {
 	rootCmd.AddCommand(newPresenceCmd(&flags))
 	rootCmd.AddCommand(newProfileCmd(&flags))
 	rootCmd.AddCommand(newDocsCmd(&flags))
+	rootCmd.AddCommand(newCapabilitiesCmd(&flags))
+	rootCmd.AddCommand(newDevicesCmd(&flags))
 	rootCmd.AddCommand(newStoreCmd(&flags))
 
 	rootCmd.SetArgs(args)

@@ -105,6 +105,7 @@ type WAClient interface {
 	Logout(ctx context.Context) error
 	LinkedJID() string
 	LinkedLID() string
+	OwnDevices(ctx context.Context) ([]wa.OwnDevice, error)
 
 	SetProfilePicture(ctx context.Context, avatar []byte) (string, error)
 	GetProfilePictureInfo(ctx context.Context, jid types.JID, preview bool, existingID string) (*types.ProfilePictureInfo, error)

@@ -3,6 +3,8 @@ package wa
 import (
 	"context"
 	"testing"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestValidateMessageID(t *testing.T) {
@@ -33,5 +35,24 @@ func TestSendExtras(t *testing.T) {
 	}
 	if WithMessageID(context.Background(), "") != context.Background() {
 		t.Fatal("empty id must leave the context unchanged")
+	}
+}
+
+func TestMergeOwnDevices(t *testing.T) {
+	self := types.JID{User: "5511999999999", Device: 7, Server: types.DefaultUserServer}
+	others := []types.JID{
+		{User: "5511999999999", Device: 0, Server: types.DefaultUserServer},
+		{User: "5511999999999", Device: 3, Server: types.DefaultUserServer},
+		{User: "5511999999999", Device: 3, Server: types.DefaultUserServer},
+	}
+	got := mergeOwnDevices(self, "linux", "air", others)
+	if len(got) != 3 {
+		t.Fatalf("got %+v", got)
+	}
+	if got[0].Device != 0 || got[1].Device != 3 || got[2].Device != 7 {
+		t.Fatalf("not sorted: %+v", got)
+	}
+	if !got[2].Self || got[2].Platform != "linux" || got[2].Name != "air" || got[0].Self {
+		t.Fatalf("self data wrong: %+v", got)
 	}
 }
