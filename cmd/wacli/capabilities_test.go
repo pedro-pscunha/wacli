@@ -115,7 +115,7 @@ func TestCapabilitiesWithoutDaemonFailsAndNeverConnects(t *testing.T) {
 }
 
 func TestReadOnlyKindsSkipTheSendQueue(t *testing.T) {
-	if !isReadOnlyDelegateKind(capabilitiesKind) || !isReadOnlyDelegateKind(devicesKind) || isReadOnlyDelegateKind("text") {
+	if !skipsSendQueue(capabilitiesKind) || !skipsSendQueue(devicesKind) || skipsSendQueue("text") {
 		t.Fatal("read-only kind set is wrong")
 	}
 }

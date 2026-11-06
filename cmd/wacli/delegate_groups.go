@@ -83,7 +83,7 @@ func init() {
 		}
 		return validateGroupUsers(r.Users)
 	}, run: groupParticipants})
-	registerKind(groupRequestsListKind, kindHandler{validate: validateGroupJID, run: groupRequestsList, readOnly: true})
+	registerKind(groupRequestsListKind, kindHandler{validate: validateGroupJID, run: groupRequestsList, skipsQueue: true})
 	registerKind(groupRequestsKind, kindHandler{validate: func(r sendDelegateRequest) error {
 		if err := validateGroupJID(r); err != nil {
 			return err
@@ -115,8 +115,8 @@ func init() {
 		return nil
 	}, run: groupJoin})
 	registerKind(groupLeaveKind, kindHandler{validate: validateGroupJID, run: groupLeave})
-	registerKind(groupInfoKind, kindHandler{validate: validateGroupJID, run: groupInfo, readOnly: true})
-	registerKind(groupRefreshKind, kindHandler{validate: func(sendDelegateRequest) error { return nil }, run: groupRefresh, readOnly: true})
+	registerKind(groupInfoKind, kindHandler{validate: validateGroupJID, run: groupInfo, skipsQueue: true})
+	registerKind(groupRefreshKind, kindHandler{validate: func(sendDelegateRequest) error { return nil }, run: groupRefresh, skipsQueue: true})
 }
 
 func validateGroupJID(r sendDelegateRequest) error {

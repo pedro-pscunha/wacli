@@ -18,11 +18,21 @@ import (
 type kindHandler struct {
 	validate func(sendDelegateRequest) error
 	run      func(context.Context, *app.App, sendDelegateRequest) (any, error)
-	// readOnly kinds neither queue behind sends nor take a paced slot.
-	readOnly bool
-	// bulk kinds run for minutes on a slot of their own.
-	bulk bool
+	// skipsQueue kinds neither queue behind sends nor take a paced slot. They
+	// can still write the local database (group info, channel list): the name
+	// says only that they do not wait on the send queue.
+	skipsQueue bool
+	// slot says which queue the kind runs on. The zero value is the send queue.
+	slot slotKind
 }
+
+type slotKind int
+
+const (
+	slotSend slotKind = iota
+	// slotBulk gives the kind a slot of its own: a long backfill.
+	slotBulk
+)
 
 var delegateHandlers = map[string]kindHandler{}
 
@@ -35,7 +45,7 @@ func registerKind(kind string, h kindHandler) {
 
 func isLongBulkKind(kind string) bool {
 	h, ok := delegateHandlers[kind]
-	return ok && h.bulk
+	return ok && h.slot == slotBulk
 }
 
 func isBulkKind(kind string) bool {

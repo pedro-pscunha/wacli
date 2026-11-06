@@ -53,10 +53,10 @@ func TestChannelKindsDelegateThroughSocket(t *testing.T) {
 
 func TestDoctorKindIsReadOnlyAndRegistered(t *testing.T) {
 	h, ok := delegateHandlers[doctorKind]
-	if !ok || !h.readOnly || h.bulk {
+	if !ok || !h.skipsQueue || (h.slot == slotBulk) {
 		t.Fatalf("doctor handler = %+v ok=%v", h, ok)
 	}
-	if !isReadOnlyDelegateKind(doctorKind) {
+	if !skipsSendQueue(doctorKind) {
 		t.Fatal("doctor must skip the send queue")
 	}
 }

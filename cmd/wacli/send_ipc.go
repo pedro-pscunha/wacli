@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openclaw/wacli/internal/app"
@@ -262,19 +263,16 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 	// One slot serializes delegated operations. Waiting for it is bounded by
 	// each caller's deadline, paced or not, so an operation still queued when
 	// its caller gives up is refused instead of running late (#446).
-	sendSlot := make(chan struct{}, 1)
-	sendSlot <- struct{}{}
-	// Media waits never consume a send slot. A separate per-owner slot ensures
-	// concurrent exact downloads recheck the cache before requesting the phone.
-	mediaSlot := make(chan struct{}, 1)
-	mediaSlot <- struct{}{}
-	// Long backfills (history, media) take one slot of their own.
-	bulkSlot := make(chan struct{}, 1)
-	bulkSlot <- struct{}{}
+	slots := newDelegateSlots()
 	// One pacer shared across connections: it spaces the serialized delegated
 	// sends so a burst of `wacli send` processes delegating to this daemon
 	// leaves the wire paced instead of back-to-back. Disabled = no-op.
 	pacer := newSendPacer(spacing)
+	// Handlers get their own context so stop can cancel them, and a wait group
+	// so stop can wait for them: closing the database under a running backfill
+	// would corrupt its last writes.
+	hctx, hcancel := context.WithCancel(ctx)
+	var handlers sync.WaitGroup
 	go func() {
 		defer close(done)
 		for {
@@ -282,7 +280,11 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 			if err != nil {
 				return
 			}
-			go handleSendDelegateConn(ctx, conn, execute, sendSlot, pacer, mediaSlot, bulkSlot)
+			handlers.Add(1)
+			go func() {
+				defer handlers.Done()
+				serveDelegateConn(hctx, conn, execute, slots, pacer)
+			}()
 		}
 	}()
 
@@ -290,6 +292,19 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
 		_ = ln.Close()
 		<-done
 		_ = os.Remove(path)
+		// Let in-flight requests finish, then cancel them and wait once more.
+		drained := make(chan struct{})
+		go func() { handlers.Wait(); close(drained) }()
+		select {
+		case <-drained:
+		case <-time.After(sendDelegateStopGrace):
+			hcancel()
+			select {
+			case <-drained:
+			case <-time.After(sendDelegateStopGrace):
+			}
+		}
+		hcancel()
 	}
 	return stop, nil
 }
@@ -308,16 +323,39 @@ func removeStaleSendDelegateSocket(path string) error {
 	return os.Remove(path)
 }
 
-func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateExecutor, sendSlot chan struct{}, pacer *sendPacer, mediaSlots ...chan struct{}) {
-	// Existing direct handler tests omit media support; the production server
-	// supplies one shared media slot across all of its accepted connections.
-	var mediaSlot, bulkSlot chan struct{}
-	if len(mediaSlots) != 0 {
-		mediaSlot = mediaSlots[0]
+// delegateSlots holds the queues of the delegate server. Sends share one slot
+// and are paced. Exact media downloads have one. Every long bulk kind has a
+// slot of its own, so a media backfill never delays a history repair.
+type delegateSlots struct {
+	send  chan struct{}
+	media chan struct{}
+	bulk  map[string]chan struct{}
+}
+
+func newDelegateSlots() *delegateSlots {
+	one := func() chan struct{} { c := make(chan struct{}, 1); c <- struct{}{}; return c }
+	sl := &delegateSlots{send: one(), media: one(), bulk: map[string]chan struct{}{}}
+	for kind, h := range delegateHandlers {
+		if h.slot == slotBulk {
+			sl.bulk[kind] = one()
+		}
 	}
-	if len(mediaSlots) > 1 {
-		bulkSlot = mediaSlots[1]
+	return sl
+}
+
+// slotFor returns the slot a bulk kind queues on, or nil when it has none.
+func (sl *delegateSlots) slotFor(kind string) chan struct{} {
+	if kind == mediaDownloadKind {
+		return sl.media
 	}
+	return sl.bulk[kind]
+}
+
+// sendDelegateStopGrace bounds how long stop waits for in-flight requests.
+const sendDelegateStopGrace = 10 * time.Second
+
+func serveDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateExecutor, slots *delegateSlots, pacer *sendPacer) {
+	sendSlot := slots.send
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
 
@@ -351,15 +389,13 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
 	_ = conn.SetDeadline(deadline.Add(sendDelegateResponseGrace))
 
 	if isBulkKind(req.Kind) {
-		// Media recovery shares one slot. Long backfills use their own, so a
-		// backfill never delays an exact media download.
-		slot := mediaSlot
-		if isLongBulkKind(req.Kind) {
-			slot = bulkSlot
-		}
+		slot := slots.slotFor(req.Kind)
 		if slot == nil || req.Version != sendDelegateVersion {
-			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "unsupported bulk delegate"})
+			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "unsupported bulk delegate " + req.Kind})
 			return
+		}
+		expired := func() {
+			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: req.Kind + " request expired before dispatch; it was not run"})
 		}
 		// Requests carry one JSON value and clients leave the socket open for
 		// the reply. A peer disconnect cancels queued or running recovery; it
@@ -369,13 +405,13 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
 		go func() { _, _ = io.Copy(io.Discard, conn); cancel() }()
 		select {
 		case <-requestCtx.Done():
-			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "media request expired before recovery dispatch"})
+			expired()
 			return
 		case <-slot:
 			defer func() { slot <- struct{}{} }()
 		}
 		if requestCtx.Err() != nil {
-			_ = json.NewEncoder(conn).Encode(sendDelegateResponse{OK: false, Error: "media request expired before recovery dispatch"})
+			expired()
 			return
 		}
 		resp, err := execute(requestCtx, req)
@@ -387,7 +423,7 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
 		_ = json.NewEncoder(conn).Encode(resp)
 		return
 	}
-	if isReadOnlyDelegateKind(req.Kind) {
+	if skipsSendQueue(req.Kind) {
 		// These kinds only read: they neither queue behind sends nor take a
 		// paced send slot, and a stalled send must not hide the daemon.
 		resp, err := execute(requestCtx, req)

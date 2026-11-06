@@ -37,7 +37,7 @@ type doctorLive struct {
 }
 
 func init() {
-	registerKind(channelsListKind, kindHandler{readOnly: true, validate: func(sendDelegateRequest) error { return nil },
+	registerKind(channelsListKind, kindHandler{skipsQueue: true, validate: func(sendDelegateRequest) error { return nil },
 		run: func(ctx context.Context, a *app.App, r sendDelegateRequest) (any, error) {
 			if err := ensureLive(ctx, a); err != nil {
 				return nil, err
@@ -52,7 +52,7 @@ func init() {
 			}
 			return channelsListResult{Channels: rows}, nil
 		}})
-	registerKind(channelsInfoKind, kindHandler{readOnly: true, validate: validateChannelJID,
+	registerKind(channelsInfoKind, kindHandler{skipsQueue: true, validate: validateChannelJID,
 		run: func(ctx context.Context, a *app.App, r sendDelegateRequest) (any, error) {
 			jid, _ := parseChannelJID(r.Chat)
 			if err := ensureLive(ctx, a); err != nil {
@@ -112,7 +112,7 @@ func init() {
 			return channelLeaveResult{JID: jid.String()}, nil
 		}})
 	// Read-only: reports the daemon's live connection state, writes nothing.
-	registerKind(doctorKind, kindHandler{readOnly: true, validate: func(sendDelegateRequest) error { return nil },
+	registerKind(doctorKind, kindHandler{skipsQueue: true, validate: func(sendDelegateRequest) error { return nil },
 		run: func(ctx context.Context, a *app.App, r sendDelegateRequest) (any, error) {
 			w := a.WA()
 			live := doctorLive{Connected: w.IsConnected(), Authed: w.IsAuthed()}

@@ -73,42 +73,100 @@ func TestHistoryBackfillRejectsBadInputBeforeIO(t *testing.T) {
 	}
 }
 
-// A backfill holds the bulk slot for minutes. A media download and a send must
-// not wait for it, and two backfills must not run at once.
-func TestBulkKindUsesItsOwnSlot(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer clientConn.Close()
-	sendSlot := make(chan struct{}, 1)
-	sendSlot <- struct{}{}
-	mediaSlot := make(chan struct{}, 1)
-	mediaSlot <- struct{}{}
-	bulkSlot := make(chan struct{}, 1) // empty: another backfill runs
-	ran := make(chan struct{}, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handleSendDelegateConn(context.Background(), serverConn, func(context.Context, sendDelegateRequest) (sendDelegateResponse, error) {
-			ran <- struct{}{}
-			return sendDelegateResponse{OK: true}, nil
-		}, sendSlot, newSendPacer(sendSpacing{}), mediaSlot, bulkSlot)
-	}()
-	_ = clientConn.SetDeadline(time.Now().Add(2 * time.Second))
-	enc := sendDelegateRequest{Version: sendDelegateVersion, Kind: mediaBackfillKind, TimeoutMS: 200}
-	if err := jsonEncode(clientConn, enc); err != nil {
-		t.Fatal(err)
+// Every long bulk kind has a slot of its own: a media backfill that runs for
+// hours must not delay a history repair, and neither touches sends or exact
+// media downloads. Two requests of the same kind still queue, and the expiry
+// error names the kind.
+func TestBulkKindsHaveSeparateSlots(t *testing.T) {
+	slots := newDelegateSlots()
+	if slots.slotFor(historyBackfillKind) == nil || slots.slotFor(mediaBackfillKind) == nil {
+		t.Fatal("a bulk kind has no slot")
 	}
-	var resp sendDelegateResponse
-	if err := jsonDecode(clientConn, &resp); err != nil {
-		t.Fatal(err)
+	if slots.slotFor(historyBackfillKind) == slots.slotFor(mediaBackfillKind) {
+		t.Fatal("history and media backfill share a slot")
 	}
-	<-done
-	if resp.OK || len(ran) != 0 {
-		t.Fatalf("a second backfill ran while the slot was taken: %+v", resp)
+	if slots.slotFor(historyBackfillKind) == slots.send || slots.slotFor(mediaBackfillKind) == slots.media {
+		t.Fatal("a backfill shares the send or the exact-download slot")
 	}
-	if len(mediaSlot) != 1 || len(sendSlot) != 1 {
-		t.Fatal("a backfill must not touch the media or send slot")
+	if slots.slotFor(mediaDownloadKind) != slots.media {
+		t.Fatal("exact downloads lost their slot")
 	}
+
+	run := func(kind string, taken chan struct{}) (sendDelegateResponse, bool) {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		ran := make(chan struct{}, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			serveDelegateConn(context.Background(), serverConn, func(context.Context, sendDelegateRequest) (sendDelegateResponse, error) {
+				ran <- struct{}{}
+				return sendDelegateResponse{OK: true}, nil
+			}, slots, newSendPacer(sendSpacing{}))
+		}()
+		_ = clientConn.SetDeadline(time.Now().Add(2 * time.Second))
+		if err := json.NewEncoder(clientConn).Encode(sendDelegateRequest{Version: sendDelegateVersion, Kind: kind, TimeoutMS: 200}); err != nil {
+			t.Fatal(err)
+		}
+		var resp sendDelegateResponse
+		if err := json.NewDecoder(clientConn).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+		return resp, len(ran) == 1
+	}
+
+	// A media backfill is running: take its slot. History still runs.
+	media := slots.slotFor(mediaBackfillKind)
+	<-media
+	if resp, ran := run(historyBackfillKind, nil); !resp.OK || !ran {
+		t.Fatalf("history backfill waited behind media backfill: %+v ran=%v", resp, ran)
+	}
+	// A second media backfill queues, then expires, and the error names it.
+	resp, ran := run(mediaBackfillKind, nil)
+	if resp.OK || ran || !strings.Contains(resp.Error, mediaBackfillKind) {
+		t.Fatalf("second media backfill: %+v ran=%v", resp, ran)
+	}
+	media <- struct{}{}
 }
 
-func jsonEncode(c net.Conn, v any) error { return json.NewEncoder(c).Encode(v) }
-func jsonDecode(c net.Conn, v any) error { return json.NewDecoder(c).Decode(v) }
+// stop must not return while a request still runs: the caller closes the
+// database next. A request that finishes within the grace period is waited
+// for; one that ignores cancellation is abandoned after a bounded wait.
+func TestStopWaitsForInFlightHandlers(t *testing.T) {
+	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
+	storeDir := shortPresenceDelegateStoreDir(t)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	stop, err := startSendDelegateServerForStore(context.Background(), storeDir, sendSpacing{}, func(ctx context.Context, req sendDelegateRequest) (sendDelegateResponse, error) {
+		close(started)
+		<-release
+		return sendDelegateResponse{OK: true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("unix", sendDelegateSocketPath(storeDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(sendDelegateRequest{Version: sendDelegateVersion, Kind: "text", TimeoutMS: 20000}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while a request was still running")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stop did not return after the request finished")
+	}
+}

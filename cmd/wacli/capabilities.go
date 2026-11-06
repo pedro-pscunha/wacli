@@ -58,13 +58,13 @@ func currentCapabilities() *delegateCapabilities {
 	}
 }
 
-// isReadOnlyDelegateKind reports the kinds that only read.
-func isReadOnlyDelegateKind(kind string) bool {
+// skipsSendQueue reports the kinds that run outside the send queue and pacing.
+func skipsSendQueue(kind string) bool {
 	if kind == capabilitiesKind || kind == devicesKind {
 		return true
 	}
 	h, ok := delegateHandlers[kind]
-	return ok && h.readOnly
+	return ok && h.skipsQueue
 }
 
 func executeDelegatedCapabilities() (sendDelegateResponse, error) {

@@ -42,9 +42,9 @@ type labelsListResult struct {
 }
 
 func init() {
-	registerKind(historyBackfillKind, kindHandler{bulk: true, validate: validateHistoryBackfill, run: runHistoryBackfill})
-	registerKind(mediaBackfillKind, kindHandler{bulk: true, validate: validateMediaBackfill, run: runMediaBackfill})
-	registerKind(labelsListKind, kindHandler{readOnly: true, validate: func(sendDelegateRequest) error { return nil }, run: runLabelsListKind})
+	registerKind(historyBackfillKind, kindHandler{slot: slotBulk, validate: validateHistoryBackfill, run: runHistoryBackfill})
+	registerKind(mediaBackfillKind, kindHandler{slot: slotBulk, validate: validateMediaBackfill, run: runMediaBackfill})
+	registerKind(labelsListKind, kindHandler{skipsQueue: true, validate: func(sendDelegateRequest) error { return nil }, run: runLabelsListKind})
 }
 
 func historyOptions(r sendDelegateRequest) app.BackfillOptions {

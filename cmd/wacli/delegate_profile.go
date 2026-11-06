@@ -92,7 +92,7 @@ func init() {
 			}
 			return profilePictureSetResult{PictureID: id, Removed: true}, nil
 		}})
-	registerKind(profileGetAboutKind, kindHandler{readOnly: true, validate: validateProfileTarget,
+	registerKind(profileGetAboutKind, kindHandler{skipsQueue: true, validate: validateProfileTarget,
 		run: func(ctx context.Context, a *app.App, r sendDelegateRequest) (any, error) {
 			target, _ := parseProfileTarget(r.To)
 			if err := ensureLive(ctx, a); err != nil {
@@ -104,7 +104,7 @@ func init() {
 			}
 			return out, nil
 		}})
-	registerKind(profilePictureInfoKind, kindHandler{readOnly: true, validate: func(r sendDelegateRequest) error {
+	registerKind(profilePictureInfoKind, kindHandler{skipsQueue: true, validate: func(r sendDelegateRequest) error {
 		if err := validateProfileTarget(r); err != nil {
 			return err
 		}
@@ -123,7 +123,7 @@ func init() {
 		}
 		return formatProfilePictureInfo(target, info), nil
 	}})
-	registerKind(profileBusinessKind, kindHandler{readOnly: true, validate: validateProfileTarget,
+	registerKind(profileBusinessKind, kindHandler{skipsQueue: true, validate: validateProfileTarget,
 		run: func(ctx context.Context, a *app.App, r sendDelegateRequest) (any, error) {
 			target, _ := parseProfileTarget(r.To)
 			if err := ensureLive(ctx, a); err != nil {
