@@ -32,7 +32,7 @@ Use --dry-run to preview what would be deleted.`,
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newLocalApp(ctx, flags, false)
 			if err != nil {
 				return err
 			}

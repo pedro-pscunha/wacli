@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,5 +234,63 @@ func TestCapabilitiesAdvertiseStorePin(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("capabilities must list store_pin so a health check can tell the binary honours pins")
+	}
+}
+
+// m-b: local-only maintenance never connects, so a pinned store lets it take the
+// lock while the daemon is down. While the daemon runs it gets the maintenance
+// message, not the connect refusal, which names the wrong cause.
+func TestLocalMaintenanceWorksOnPinnedStoreWhenDaemonIsDown(t *testing.T) {
+	isolateAccountConfigHome(t)
+	t.Setenv("WACLI_DELEGATE_ONLY", "")
+	store := t.TempDir()
+	if err := os.WriteFile(filepath.Join(store, config.DelegateOnlyMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"store", "cleanup", "--days", "365", "--dry-run"},
+		{"chats", "cleanup", "--days", "365", "--dry-run"},
+	} {
+		err := execute(append([]string{"--store", store}, args...))
+		if err != nil && (strings.Contains(err.Error(), "refusing to connect") || strings.Contains(err.Error(), "pinned to the sync daemon")) {
+			t.Errorf("%v: local maintenance refused on a pinned store with no daemon: %v", args, err)
+		}
+	}
+}
+
+func TestLocalMaintenanceGetsMaintenanceMessageWhileDaemonRuns(t *testing.T) {
+	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
+	store := shortPresenceDelegateStoreDir(t)
+	if err := os.WriteFile(filepath.Join(store, config.DelegateOnlyMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := startPresenceDelegateTestSocket(t, store, func(sendDelegateRequest) sendDelegateResponse {
+		return sendDelegateResponse{OK: true}
+	})
+	defer server.stop()
+	_, stderr, err := runPresenceDelegateHelper(t, []string{"--store", store, "--timeout", "750ms", "store", "cleanup", "--days", "365", "--dry-run"})
+	if err == nil || !strings.Contains(stderr, "pinned to the sync daemon and the daemon is running") {
+		t.Fatalf("err=%v stderr=%q", err, stderr)
+	}
+	if strings.Contains(stderr, "refusing to connect") {
+		t.Fatalf("wrong cause named: %q", stderr)
+	}
+}
+
+// The App a local command gets still cannot connect.
+func TestLocalAppOnPinnedStoreStillRefusesConnect(t *testing.T) {
+	isolateAccountConfigHome(t)
+	t.Setenv("WACLI_DELEGATE_ONLY", "")
+	store := t.TempDir()
+	if err := os.WriteFile(filepath.Join(store, config.DelegateOnlyMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, lk, err := newLocalApp(context.Background(), &rootFlags{storeDir: store}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeApp(a, lk)
+	if err := a.Connect(context.Background(), false, nil); err == nil || !strings.Contains(err.Error(), "refusing to connect") {
+		t.Fatalf("Connect err = %v", err)
 	}
 }

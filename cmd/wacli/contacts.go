@@ -135,7 +135,7 @@ func newContactsRefreshCmd(flags *rootFlags) *cobra.Command {
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 
-			a, lk, err := newApp(ctx, flags, true, true)
+			a, lk, err := newLocalApp(ctx, flags, true)
 			if err != nil {
 				return err
 			}
@@ -194,7 +194,7 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newLocalApp(ctx, flags, false)
 			if err != nil {
 				return err
 			}
@@ -226,7 +226,7 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newLocalApp(ctx, flags, false)
 			if err != nil {
 				return err
 			}
@@ -270,7 +270,7 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newLocalApp(ctx, flags, false)
 			if err != nil {
 				return err
 			}
@@ -303,7 +303,7 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newLocalApp(ctx, flags, false)
 			if err != nil {
 				return err
 			}

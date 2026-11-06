@@ -37,7 +37,7 @@ restore the payload. Live messages must first receive an explicit deletion event
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newLocalApp(ctx, flags, false)
 			if err != nil {
 				return err
 			}

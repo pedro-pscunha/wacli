@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,6 +133,22 @@ func writeRootError(flags rootFlags, err error) {
 }
 
 func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool) (*app.App, *lock.Lock, error) {
+	return openApp(ctx, flags, needLock, allowUnauthed, false)
+}
+
+// newLocalApp is newApp for a command that only works on the local store and
+// never connects (store cleanup, messages purge, contacts alias, ...). On a
+// pinned store it takes the lock normally while the daemon is down, because the
+// App it returns still refuses Connect. While the daemon runs it fails with
+// the maintenance message below instead of the connect refusal, which would
+// name the wrong cause.
+func newLocalApp(ctx context.Context, flags *rootFlags, allowUnauthed bool) (*app.App, *lock.Lock, error) {
+	return openApp(ctx, flags, true, allowUnauthed, true)
+}
+
+var errPinnedStoreMaintenance = errors.New("store is pinned to the sync daemon and the daemon is running: stop the daemon to run local maintenance on this store")
+
+func openApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed bool, localOnly bool) (*app.App, *lock.Lock, error) {
 	storeDir, err := resolveStoreDir(flags)
 	if err != nil {
 		return nil, nil, err
@@ -143,10 +160,18 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed 
 		// touched: a refused call must not hold either, or it can block the
 		// daemon's own restart. A listening daemon means the store is in use,
 		// and the caller delegates; nothing listening means refuse.
-		if !sendDelegateAvailable(ctx, storeDir) {
+		listening := sendDelegateAvailable(ctx, storeDir)
+		switch {
+		case localOnly && listening:
+			return nil, nil, errPinnedStoreMaintenance
+		case localOnly:
+			// No daemon: the lock below is free, and DelegateOnly stays on, so
+			// the App cannot connect even by mistake.
+		case !listening:
 			return nil, nil, app.ErrDelegateOnly
+		default:
+			return nil, nil, fmt.Errorf("%w: the sync daemon serves this store (--delegate-only)", lock.ErrLocked)
 		}
-		return nil, nil, fmt.Errorf("%w: the sync daemon serves this store (--delegate-only)", lock.ErrLocked)
 	}
 
 	var lk *lock.Lock
