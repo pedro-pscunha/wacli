@@ -8,6 +8,8 @@ import (
 
 	"github.com/openclaw/wacli/internal/app"
 	"github.com/openclaw/wacli/internal/wa"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -28,6 +30,16 @@ type daemonFakeWA struct {
 	sendIDs      []types.MessageID
 	idsSeen      []types.MessageID
 	revokes      int
+
+	protoSends     []types.JID
+	deletesForMe   int
+	groupNames     []string
+	profileNames   []string
+	profileAbouts  []string
+	followed       []types.JID
+	joinedGroups   []*types.GroupInfo
+	newsletters    []*types.NewsletterMetadata
+	historyRequest int
 }
 
 func newDaemonFakeWA() *daemonFakeWA {
@@ -115,7 +127,12 @@ func (f *daemonFakeWA) SendText(ctx context.Context, to types.JID, text string) 
 // fake rather than refused.
 func newDaemonApp(t *testing.T, f *daemonFakeWA) *app.App {
 	t.Helper()
-	a, err := app.New(app.Options{StoreDir: t.TempDir(), WA: f})
+	return newDaemonAppAt(t, f, t.TempDir())
+}
+
+func newDaemonAppAt(t *testing.T, f *daemonFakeWA, dir string) *app.App {
+	t.Helper()
+	a, err := app.New(app.Options{StoreDir: dir, WA: f})
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
@@ -132,3 +149,73 @@ func fastDaemonPolling(t *testing.T) {
 	daemonConnectionPollInterval = 5 * time.Millisecond
 	t.Cleanup(func() { daemonConnectionPollInterval = old })
 }
+
+func (f *daemonFakeWA) SendProtoMessage(ctx context.Context, to types.JID, msg *waProto.Message) (types.MessageID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.protoSends = append(f.protoSends, to)
+	f.idsSeen = append(f.idsSeen, wa.MessageIDFromContext(ctx))
+	if id := wa.MessageIDFromContext(ctx); id != "" {
+		return id, nil
+	}
+	return types.MessageID("PROTOID000001"), nil
+}
+func (f *daemonFakeWA) RevokeMessage(ctx context.Context, chat types.JID, target types.MessageID) (types.MessageID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokes++
+	if id := wa.MessageIDFromContext(ctx); id != "" {
+		return id, nil
+	}
+	return types.MessageID("REVOKEID00001"), nil
+}
+func (f *daemonFakeWA) DeleteMessageForMe(ctx context.Context, info types.MessageInfo, deleteMedia bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletesForMe++
+	return nil
+}
+func (f *daemonFakeWA) ArchiveChat(ctx context.Context, target types.JID, archive bool, ts time.Time, key *waCommon.MessageKey, before func()) ([]any, error) {
+	return nil, nil
+}
+func (f *daemonFakeWA) SetGroupName(ctx context.Context, jid types.JID, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.groupNames = append(f.groupNames, name)
+	return nil
+}
+func (f *daemonFakeWA) GetJoinedGroups(context.Context) ([]*types.GroupInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.joinedGroups, nil
+}
+func (f *daemonFakeWA) SetProfileName(ctx context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.profileNames = append(f.profileNames, name)
+	return nil
+}
+func (f *daemonFakeWA) SetStatusMessage(ctx context.Context, msg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.profileAbouts = append(f.profileAbouts, msg)
+	return nil
+}
+func (f *daemonFakeWA) GetSubscribedNewsletters(context.Context) ([]*types.NewsletterMetadata, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.newsletters, nil
+}
+func (f *daemonFakeWA) UnfollowNewsletter(ctx context.Context, jid types.JID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.followed = append(f.followed, jid)
+	return nil
+}
+func (f *daemonFakeWA) OwnDevices(context.Context) ([]wa.OwnDevice, error) {
+	return []wa.OwnDevice{{JID: "5511000000000@s.whatsapp.net", Self: true}}, nil
+}
+func (f *daemonFakeWA) FetchAppStateEvents(context.Context, string, bool, bool) ([]any, error) {
+	return nil, nil
+}
+func (f *daemonFakeWA) HasLocalAppState(context.Context, string) (bool, error) { return true, nil }
