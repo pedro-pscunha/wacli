@@ -140,6 +140,9 @@ type sendDelegateResponse struct {
 	// AlreadySent means a message with the requested --id was already sent and
 	// stored, so nothing went on the wire this time. ID is that message.
 	AlreadySent bool `json:"already_sent,omitempty"`
+	// IDMismatch is set by the client, never sent by a daemon: the id the
+	// caller asked for, when the daemon sent the message under another id.
+	IDMismatch string `json:"id_mismatch,omitempty"`
 	// Data carries the typed result of the kinds added after protocol 1 began.
 	Data json.RawMessage `json:"data,omitempty"`
 }
@@ -204,8 +207,10 @@ func delegateSend(ctx context.Context, flags *rootFlags, req sendDelegateRequest
 	}
 	if req.NewID != "" && resp.Sent && resp.ID != req.NewID {
 		// A daemon built before --id existed ignores new_id and sends with a
-		// random ID. Say so: the caller keys its idempotency on the ID.
-		return sendDelegateResponse{}, fmt.Errorf("the sync daemon ignored --id %s and sent the message with id %s (daemon too old); do not retry", req.NewID, resp.ID)
+		// random ID. The message WAS sent, so this is not a failure: return it
+		// as sent with a warning, and the caller records the id it really got.
+		resp.IDMismatch = req.NewID
+		fmt.Fprintf(os.Stderr, "warning: the sync daemon ignored --id %s and sent the message with id %s (daemon too old); the message was sent, do not retry\n", req.NewID, resp.ID)
 	}
 	return resp, nil
 }
@@ -231,6 +236,12 @@ func tryDelegateSend(ctx context.Context, flags *rootFlags, lockErr error, req s
 	resp, err := delegateSend(ctx, flags, req)
 	if err != nil {
 		if errors.Is(err, errSendDelegateUnavailable) {
+			if storeDir, derr := resolveStoreDir(flags); derr == nil && flags.delegateOnlyFor(storeDir) {
+				// The lock is held but nothing answers the socket: the daemon is
+				// starting, or another process holds the store. Say so in the
+				// documented words, so callers that match on them classify it.
+				return sendDelegateResponse{}, false, fmt.Errorf("%w: the store is locked but the daemon's socket does not answer (daemon starting or another process holds the store); %v", app.ErrDelegateOnly, lockErr)
+			}
 			return sendDelegateResponse{}, false, lockErr
 		}
 		return sendDelegateResponse{}, true, err
@@ -921,6 +932,13 @@ func writeDelegatedSendOutput(flags *rootFlags, kind string, resp sendDelegateRe
 	warnSendStoreFailureMsg(os.Stderr, resp.ID, resp.StoreWarning)
 	if flags.asJSON {
 		body := map[string]any{"sent": resp.Sent, "to": resp.To, "id": resp.ID}
+		if resp.AlreadySent {
+			body["already_sent"] = true
+		}
+		if resp.IDMismatch != "" {
+			body["id_requested"] = resp.IDMismatch
+			body["warning"] = "the sync daemon ignored --id; the message was sent under the id above"
+		}
 		if resp.File != nil {
 			body["file"] = resp.File
 		}

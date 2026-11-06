@@ -241,9 +241,10 @@ func TestWriteCommandsRefusedWithoutDaemonWhenDelegateOnly(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
 			t.Fatalf("%v: err = %v, want delegate-only refusal", c, err)
 		}
-		if _, statErr := os.Stat(filepath.Join(store, "session.db")); statErr == nil {
-			// OpenWA may create the session store; a connection never starts.
-			t.Logf("%v: session.db created (no connection)", c)
+		for _, name := range []string{"session.db", "wacli.db", "LOCK"} {
+			if _, statErr := os.Stat(filepath.Join(store, name)); statErr == nil {
+				t.Errorf("%v: %s was created by a refused call", c, name)
+			}
 		}
 	}
 }

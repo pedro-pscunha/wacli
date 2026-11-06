@@ -662,7 +662,15 @@ type OwnDevice struct {
 }
 
 // OwnDevices lists the devices linked to this account: the primary phone
-// (device 0) and every companion, including this one. It queries WhatsApp.
+// (device 0) and every companion, including this one.
+//
+// The list can come from whatsmeow's in-memory device cache. That cache has no
+// public way to drop an entry, so a long-lived daemon answers from it until a
+// device notification or its restart refreshes it; a notification the daemon
+// missed leaves it stale. The result is therefore evidence that a device IS
+// linked, which is what the slot check needs. It is weaker proof that a device
+// is GONE (the "PC device removed" check): confirm that after a daemon restart,
+// or on the phone under Linked devices.
 func (c *Client) OwnDevices(ctx context.Context) ([]OwnDevice, error) {
 	c.mu.Lock()
 	cli := c.client

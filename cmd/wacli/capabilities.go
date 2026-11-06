@@ -54,7 +54,7 @@ func currentCapabilities() *delegateCapabilities {
 		Version:  effectiveVersion(),
 		Protocol: sendDelegateVersion,
 		Kinds:    kinds,
-		Features: []string{"new_id", "delegate_only"},
+		Features: []string{"new_id", "already_sent"},
 	}
 }
 
@@ -121,7 +121,9 @@ func newDevicesCmd(flags *rootFlags) *cobra.Command {
 			"WhatsApp gives the device number; the platform and name are known for this\n" +
 			"device only, and there is no last-seen time. It always asks the running\n" +
 			"`sync --follow`; it never opens a connection of its own, because a second\n" +
-			"connection acks messages it does not store.",
+			"connection acks messages it does not store. The daemon may answer from its\n" +
+			"device cache: a listed device is linked, but a missing one is only proven\n" +
+			"after the daemon restarts or on the phone's Linked devices screen.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()

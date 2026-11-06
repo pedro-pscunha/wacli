@@ -114,3 +114,75 @@ func TestDevicesNeverConnectsOutsideDaemon(t *testing.T) {
 		}
 	}
 }
+
+// m10: --delegate-only (or the environment) must not stop the daemon itself.
+// sync --follow takes the lock and starts; it fails later, on the missing
+// session, never with the delegate-only refusal.
+func TestSyncFollowIsNotRefusedUnderDelegateOnlyEnv(t *testing.T) {
+	isolateAccountConfigHome(t)
+	t.Setenv("WACLI_DELEGATE_ONLY", "1")
+	store := t.TempDir()
+	err := execute([]string{"--store", store, "sync", "--follow"})
+	if err != nil && strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+		t.Fatalf("the daemon was refused: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "not authenticated") {
+		t.Fatalf("err = %v, want the unauthenticated-store error that follows a normal start", err)
+	}
+}
+
+func TestSyncFollowIsNotRefusedUnderMarker(t *testing.T) {
+	isolateAccountConfigHome(t)
+	t.Setenv("WACLI_DELEGATE_ONLY", "")
+	store := t.TempDir()
+	if err := os.WriteFile(filepath.Join(store, config.DelegateOnlyMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := execute([]string{"--store", store, "sync", "--follow"})
+	if err != nil && strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+		t.Fatalf("the daemon was refused by its own marker: %v", err)
+	}
+}
+
+// An authenticated store with no daemon: the refusal must come from the gate,
+// before anything opens the store, and name the cause, not "not authenticated".
+func TestDelegateOnlyRefusesOnAuthenticatedStoreWithoutDaemon(t *testing.T) {
+	f := newDaemonFakeWA() // IsAuthed() is true
+	store := t.TempDir()
+	a := newDaemonAppAt(t, f, store)
+	a.Close() // leave a real store on disk, as a daemon that ran before would
+	err := execute([]string{"--store", store, "--delegate-only", "messages", "forward", "--chat", "5511999999999", "--id", "ABCDEFGH12", "--to", "5511888888888"})
+	if err == nil || !strings.Contains(err.Error(), "refusing to connect outside the sync daemon") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDeleteForMeRefusesNewID(t *testing.T) {
+	err := execute([]string{"--store", t.TempDir(), "messages", "delete", "--chat", "c", "--id", "ABCDEFGH12", "--for-me", "--new-id", "3EB0ABCDEF0123456789"})
+	if err == nil || !strings.Contains(err.Error(), "--new-id does not apply to --for-me") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// m6: the lock is held but no socket answers: the documented wording, so callers
+// that match on it classify the refusal correctly.
+func TestLockedStoreWithoutSocketUsesDocumentedWordingWhenDelegateOnly(t *testing.T) {
+	store := shortPresenceDelegateStoreDir(t)
+	lk, err := lock.Acquire(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Release()
+	_, stderr, runErr := runPresenceDelegateHelper(t, []string{"--store", store, "--delegate-only", "--timeout", "750ms", "send", "text", "--to", "+15551234567", "--message", "x"})
+	if runErr == nil || !strings.Contains(stderr, "refusing to connect outside the sync daemon") {
+		t.Fatalf("err=%v stderr=%q", runErr, stderr)
+	}
+}
+
+func TestCapabilitiesDoNotAdvertiseClientFlags(t *testing.T) {
+	for _, f := range currentCapabilities().Features {
+		if f == "delegate_only" {
+			t.Fatal("delegate_only is a client flag, not a daemon feature")
+		}
+	}
+}

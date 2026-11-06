@@ -883,7 +883,9 @@ func TestSendTextIDDelegatesThroughSendSocket(t *testing.T) {
 	}
 }
 
-func TestSendTextIDRefusesDaemonThatIgnoresIt(t *testing.T) {
+// m7: an old daemon that ignored --id still SENT the message. That is a success
+// with a warning and the real id, never an error that makes a journal retry.
+func TestSendTextIDOldDaemonIgnoresItIsSentWithWarning(t *testing.T) {
 	skipPresenceDelegateSocketTestOnUnsupportedOS(t)
 	storeDir := shortPresenceDelegateStoreDir(t)
 	lk, err := lock.Acquire(storeDir)
@@ -897,12 +899,20 @@ func TestSendTextIDRefusesDaemonThatIgnoresIt(t *testing.T) {
 	})
 	defer server.stop()
 
-	_, stderr, err := runPresenceDelegateHelper(t, []string{
+	stdout, stderr, err := runPresenceDelegateHelper(t, []string{
 		"--store", storeDir, "--json", "--timeout", "750ms",
 		"send", "text", "--to", "+15551234567", "--message", "hi", "--id", "3EB0ABCDEF0123456789",
 	})
-	if err == nil || !strings.Contains(stderr, "daemon too old") {
-		t.Fatalf("err=%v stderr=%q, want an old-daemon error", err, stderr)
+	if err != nil {
+		t.Fatalf("a sent message must not be an error: %v stderr=%q", err, stderr)
+	}
+	for _, want := range []string{`"sent":true`, `"id":"RANDOMID12345"`, `"id_requested":"3EB0ABCDEF0123456789"`, `"warning"`} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks %s: %q", want, stdout)
+		}
+	}
+	if !strings.Contains(stderr, "daemon too old") {
+		t.Errorf("stderr lacks the warning: %q", stderr)
 	}
 }
 
