@@ -60,10 +60,6 @@ func storedKindOf(kind string) string {
 	return kind
 }
 
-func storedRefHash(ref store.OwnMessageRef, kind string) string {
-	return store.ContentHash(storedKindOf(kind), ref.Text)
-}
-
 // alreadySentResponse makes a retry with the same --id safe. Before anything
 // goes on the wire it looks the id up among this account's sent messages.
 //

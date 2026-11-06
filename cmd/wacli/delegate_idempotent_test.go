@@ -284,7 +284,7 @@ func TestStoreWarningKeepsASentRowAndTheRetryIsAlreadySent(t *testing.T) {
 	if err != nil || early != nil {
 		t.Fatalf("begin: %v %v", err, early)
 	}
-	wa.MarkDispatched(ctx)
+	wa.SendPhaseFrom(ctx).MarkDispatched()
 	finish(nil, "message update: disk full", "551187654321@s.whatsapp.net") // sent, store failed
 
 	resp, err := executeDelegatedSend(context.Background(), a, textRequestWith(to, "hi"))
@@ -441,7 +441,7 @@ func TestLocalGuardWritesAndKeepsThePendingRow(t *testing.T) {
 	}
 	// The ack wait was cut after dispatch: the row must stay. The real client
 	// marks the dispatch right before it hands the frame to whatsmeow.
-	wa.MarkDispatched(sendCtx)
+	wa.SendPhaseFrom(sendCtx).MarkDispatched()
 	finish(context.DeadlineExceeded, "")
 	if ps, ok, _ := a.DB().GetPendingSend(retryID); !ok || ps.State != store.PendingSendInFlight {
 		t.Fatalf("an unknown outcome must keep the row: %+v ok=%v", ps, ok)

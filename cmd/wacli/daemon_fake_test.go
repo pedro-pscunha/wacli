@@ -119,12 +119,12 @@ func (f *daemonFakeWA) SendText(ctx context.Context, to types.JID, text string) 
 			// An error injected as "after dispatch" models the real client: the
 			// mark is set right before SendMessage, so the error comes after it.
 			if !f.errBeforeWire {
-				wa.MarkDispatched(ctx)
+				wa.SendPhaseFrom(ctx).MarkDispatched()
 			}
 			return "", err
 		}
 	}
-	wa.MarkDispatched(ctx)
+	wa.SendPhaseFrom(ctx).MarkDispatched()
 	f.sendTexts = append(f.sendTexts, text)
 	if id := wa.MessageIDFromContext(ctx); id != "" {
 		return id, nil

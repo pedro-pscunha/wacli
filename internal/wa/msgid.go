@@ -69,18 +69,24 @@ func WithSendPhase(ctx context.Context) (context.Context, *SendPhase) {
 	return context.WithValue(ctx, sendPhaseKey{}, p), p
 }
 
-// MarkDispatched is called just before a message is handed to the wire. The real
-// client does it inside its send methods; a fake client calls it to model the
-// same point.
-func MarkDispatched(ctx context.Context) { markDispatched(ctx) }
+// SendPhaseFrom returns the phase carried by ctx, or nil. A client implementation
+// marks it right before it hands a message to the wire; fakes do the same.
+func SendPhaseFrom(ctx context.Context) *SendPhase {
+	p, _ := ctx.Value(sendPhaseKey{}).(*SendPhase)
+	return p
+}
 
-// markDispatched is called by the client just before it hands a message to
-// whatsmeow.
-func markDispatched(ctx context.Context) {
-	if p, ok := ctx.Value(sendPhaseKey{}).(*SendPhase); ok {
+// MarkDispatched records that the send reached the wire. It is safe on a nil
+// phase.
+func (p *SendPhase) MarkDispatched() {
+	if p != nil {
 		p.dispatched.Store(true)
 	}
 }
+
+// markDispatched is called by the client just before it hands a message to
+// whatsmeow.
+func markDispatched(ctx context.Context) { SendPhaseFrom(ctx).MarkDispatched() }
 
 // ErrorAfterDispatchIsUnknown reports whether err, raised after the dispatch
 // mark, leaves it open that the server received the message. The server's own
