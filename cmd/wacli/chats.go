@@ -34,6 +34,9 @@ func newChatsCmd(flags *rootFlags) *cobra.Command {
 	cmd.AddCommand(newChatsMarkReadCmd(flags, true))
 	cmd.AddCommand(newChatsMarkReadCmd(flags, false))
 	cmd.AddCommand(newChatsCleanupCmd(flags))
+	cmd.AddCommand(newChatsDisappearingCmd(flags))
+	cmd.AddCommand(newChatsDisappearingDefaultCmd(flags))
+	cmd.AddCommand(newChatsDeleteCmd(flags))
 	return cmd
 }
 

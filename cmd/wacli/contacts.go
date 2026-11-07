@@ -23,6 +23,9 @@ func newContactsCmd(flags *rootFlags) *cobra.Command {
 	cmd.AddCommand(newContactsImportSystemCmd(flags))
 	cmd.AddCommand(newContactsAliasCmd(flags))
 	cmd.AddCommand(newContactsTagsCmd(flags))
+	cmd.AddCommand(newContactsBlockCmd(flags, true))
+	cmd.AddCommand(newContactsBlockCmd(flags, false))
+	cmd.AddCommand(newContactsBlocklistCmd(flags))
 	return cmd
 }
 

@@ -47,6 +47,7 @@ type daemonFakeWA struct {
 	// than the typed number (the Brazilian ninth digit).
 	rewriteOnWhatsApp func(phone string) (types.JID, bool)
 
+	actions       actionLog
 	userInfoCalls int
 	lidMap        map[string]string // lid user -> pn user, learned while the daemon runs
 }
@@ -273,3 +274,123 @@ func (f *daemonFakeWA) FetchAppStateEvents(context.Context, string, bool, bool) 
 	return nil, nil
 }
 func (f *daemonFakeWA) HasLocalAppState(context.Context, string) (bool, error) { return true, nil }
+
+// actionLog records the account actions of delegate_actions.go.
+type actionLog struct {
+	stars, pins, blocks, unblocks, photos, joinApprovals, memberAdds, disappearing, defaultDisappearing int
+	mutes, creates, deletes, privacySets, privacyGets, rejects, blocklistReads                          int
+	lastPinDuration                                                                                     time.Duration
+	lastPinFromMe                                                                                       bool
+	lastTimer                                                                                           time.Duration
+	lastPrivacy                                                                                         [2]string
+	lastBlocked                                                                                         types.JID
+	allMembers                                                                                          bool
+}
+
+func (f *daemonFakeWA) StarMessage(_ context.Context, _ types.MessageInfo, _ bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.stars++
+	return nil
+}
+func (f *daemonFakeWA) PinInChat(ctx context.Context, _ types.JID, _ types.JID, fromMe bool, _ types.MessageID, _ bool, d time.Duration) (types.MessageID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.pins++
+	f.actions.lastPinDuration, f.actions.lastPinFromMe = d, fromMe
+	f.idsSeen = append(f.idsSeen, wa.MessageIDFromContext(ctx))
+	if id := wa.MessageIDFromContext(ctx); id != "" {
+		return id, nil
+	}
+	return "PINMSG000001", nil
+}
+func (f *daemonFakeWA) UpdateBlocklist(_ context.Context, j types.JID, block bool) (*types.Blocklist, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if block {
+		f.actions.blocks++
+	} else {
+		f.actions.unblocks++
+	}
+	f.actions.lastBlocked = j
+	return &types.Blocklist{}, nil
+}
+func (f *daemonFakeWA) GetBlocklist(context.Context) (*types.Blocklist, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.blocklistReads++
+	return &types.Blocklist{Items: []types.BlocklistItem{{PN: types.NewJID("5511777777777", types.DefaultUserServer), Active: true}}}, nil
+}
+func (f *daemonFakeWA) SetGroupPhoto(_ context.Context, _ types.JID, b []byte) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.photos++
+	if b == nil {
+		return "remove", nil
+	}
+	return "pic1", nil
+}
+func (f *daemonFakeWA) SetGroupJoinApprovalMode(context.Context, types.JID, bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.joinApprovals++
+	return nil
+}
+func (f *daemonFakeWA) SetGroupMemberAddMode(_ context.Context, _ types.JID, all bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.memberAdds++
+	f.actions.allMembers = all
+	return nil
+}
+func (f *daemonFakeWA) SetDisappearingTimer(_ context.Context, _ types.JID, d time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.disappearing++
+	f.actions.lastTimer = d
+	return nil
+}
+func (f *daemonFakeWA) SetDefaultDisappearingTimer(_ context.Context, d time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.defaultDisappearing++
+	f.actions.lastTimer = d
+	return nil
+}
+func (f *daemonFakeWA) NewsletterToggleMute(context.Context, types.JID, bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.mutes++
+	return nil
+}
+func (f *daemonFakeWA) CreateNewsletter(_ context.Context, name, _ string) (*types.NewsletterMetadata, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.creates++
+	return &types.NewsletterMetadata{ID: types.NewJID("120363999999999999", types.NewsletterServer)}, nil
+}
+func (f *daemonFakeWA) DeleteChat(context.Context, types.JID, time.Time, bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.deletes++
+	return nil
+}
+func (f *daemonFakeWA) GetPrivacySettings(context.Context) (types.PrivacySettings, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.privacyGets++
+	return types.PrivacySettings{LastSeen: types.PrivacySettingContacts}, nil
+}
+func (f *daemonFakeWA) SetPrivacySetting(_ context.Context, name types.PrivacySettingType, v types.PrivacySetting) (types.PrivacySettings, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.privacySets++
+	f.actions.lastPrivacy = [2]string{string(name), string(v)}
+	return types.PrivacySettings{LastSeen: v}, nil
+}
+func (f *daemonFakeWA) RejectCall(context.Context, types.JID, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.rejects++
+	return nil
+}

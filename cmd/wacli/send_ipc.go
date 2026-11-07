@@ -115,6 +115,9 @@ type sendDelegateRequest struct {
 	IdleExitMS int64  `json:"idle_exit_ms,omitempty"`
 	// Strict makes revoke fail on a message the store does not know.
 	Strict bool `json:"strict,omitempty"`
+	// BackgroundColor and Font style a text status (status_post).
+	BackgroundColor string `json:"background_color,omitempty"`
+	Font            *int32 `json:"font,omitempty"`
 }
 
 type sendDelegateResponse struct {

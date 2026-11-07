@@ -114,6 +114,11 @@ func resultResponse(res any) (sendDelegateResponse, error) {
 		resp.Sent = true
 		resp.ID = p.ProducedID()
 	}
+	// A result that found its own earlier send (a status has no row in messages) says so at the response level,
+	// where callers read already_sent.
+	if m, ok := res.(interface{ wasAlreadySent() bool }); ok && m.wasAlreadySent() {
+		resp.AlreadySent = true
+	}
 	return resp, nil
 }
 
