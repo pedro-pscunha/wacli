@@ -115,6 +115,9 @@ type sendDelegateRequest struct {
 	IdleExitMS int64  `json:"idle_exit_ms,omitempty"`
 	// Strict makes revoke fail on a message the store does not know.
 	Strict bool `json:"strict,omitempty"`
+	// BackgroundColor and Font style a text status (status_post).
+	BackgroundColor string `json:"background_color,omitempty"`
+	Font            *int32 `json:"font,omitempty"`
 }
 
 type sendDelegateResponse struct {
@@ -454,16 +457,6 @@ func serveDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateE
 		_ = json.NewEncoder(conn).Encode(resp)
 		return
 	}
-	if skipsSendQueue(req.Kind) {
-		// These kinds only read: they neither queue behind sends nor take a
-		// paced send slot, and a stalled send must not hide the daemon.
-		resp, err := execute(requestCtx, req)
-		if err != nil {
-			resp = sendDelegateResponse{OK: false, Error: err.Error()}
-		}
-		_ = json.NewEncoder(conn).Encode(resp)
-		return
-	}
 	if isAppStateKind(req.Kind) {
 		// App-state writes are serialized by the app and can wait minutes on
 		// recovery, so they must not hold the send queue.
@@ -473,6 +466,16 @@ func serveDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateE
 		}
 		resp, err := execute(requestCtx, req)
 		writeDelegateResult(conn, requestCtx, req, resp, err)
+		return
+	}
+	if skipsSendQueue(req.Kind) {
+		// These kinds only read: they neither queue behind sends nor take a
+		// paced send slot, and a stalled send must not hide the daemon.
+		resp, err := execute(requestCtx, req)
+		if err != nil {
+			resp = sendDelegateResponse{OK: false, Error: err.Error()}
+		}
+		_ = json.NewEncoder(conn).Encode(resp)
 		return
 	}
 	if req.Kind == presenceSubscribeKind {

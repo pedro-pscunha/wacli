@@ -21,7 +21,8 @@ const (
 // serialized by the app and can wait minutes on recovery, so the daemon runs
 // them outside the send queue.
 func isAppStateKind(kind string) bool {
-	return kind == chatStateKind || kind == labelChatKind || kind == labelEditKind || kind == deleteForMeKind
+	return kind == chatStateKind || kind == labelChatKind || kind == labelEditKind || kind == deleteForMeKind ||
+		kind == messageStarKind || kind == chatDeleteKind
 }
 
 func newLabelsCreateCmd(flags *rootFlags) *cobra.Command {

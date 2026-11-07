@@ -1055,3 +1055,37 @@ func (f *fakeWA) LinkedLID() string {
 func (f *fakeWA) DownloadRetriedMediaToFile(ctx context.Context, directPath string, fileHash, mediaKey []byte, fileLength uint64, mediaType, targetPath string) (int64, error) {
 	return f.DownloadMediaToFile(ctx, directPath, nil, fileHash, mediaKey, fileLength, mediaType, "", targetPath)
 }
+
+func (f *fakeWA) StarMessage(context.Context, types.MessageInfo, bool) error { return nil }
+func (f *fakeWA) PinInChat(context.Context, types.JID, types.JID, bool, types.MessageID, bool, time.Duration) (types.MessageID, error) {
+	return "PIN0000001", nil
+}
+func (f *fakeWA) UpdateBlocklist(context.Context, types.JID, bool) (*types.Blocklist, error) {
+	return &types.Blocklist{}, nil
+}
+func (f *fakeWA) GetBlocklist(context.Context) (*types.Blocklist, error) {
+	return &types.Blocklist{}, nil
+}
+func (f *fakeWA) SetGroupPhoto(context.Context, types.JID, []byte) (string, error) { return "pic", nil }
+func (f *fakeWA) SetGroupJoinApprovalMode(context.Context, types.JID, bool) error  { return nil }
+func (f *fakeWA) SetGroupMemberAddMode(context.Context, types.JID, bool) error     { return nil }
+func (f *fakeWA) SetDisappearingTimer(context.Context, types.JID, time.Duration) error {
+	return nil
+}
+func (f *fakeWA) SetDefaultDisappearingTimer(context.Context, time.Duration) error { return nil }
+func (f *fakeWA) NewsletterToggleMute(context.Context, types.JID, bool) error      { return nil }
+func (f *fakeWA) CreateNewsletter(context.Context, string, string) (*types.NewsletterMetadata, error) {
+	return &types.NewsletterMetadata{}, nil
+}
+func (f *fakeWA) DeleteChat(context.Context, types.JID, time.Time, bool) error { return nil }
+func (f *fakeWA) GetPrivacySettings(context.Context) (types.PrivacySettings, error) {
+	return types.PrivacySettings{}, nil
+}
+func (f *fakeWA) SetPrivacySetting(context.Context, types.PrivacySettingType, types.PrivacySetting) (types.PrivacySettings, error) {
+	return types.PrivacySettings{}, nil
+}
+func (f *fakeWA) RejectCall(context.Context, types.JID, string) error { return nil }
+
+func (f *fakeWA) StatusAudience(context.Context) (types.StatusPrivacyType, int, error) {
+	return types.StatusPrivacyTypeContacts, 0, nil
+}

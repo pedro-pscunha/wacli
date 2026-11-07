@@ -160,8 +160,10 @@ func validateGroupSetting(r sendDelegateRequest) error {
 	if err := validateGroupJID(r); err != nil {
 		return err
 	}
-	if r.SubAction != "announce-only" && r.SubAction != "locked" {
-		return fmt.Errorf("unsupported group setting %q (announce-only|locked)", r.SubAction)
+	switch r.SubAction {
+	case "announce-only", "locked", "join-approval", "member-add":
+	default:
+		return fmt.Errorf("unsupported group setting %q (announce-only|locked|join-approval|member-add)", r.SubAction)
 	}
 	if r.Enable == nil {
 		return fmt.Errorf("exactly one of --on or --off is required")
@@ -238,10 +240,15 @@ func groupSetting(ctx context.Context, a *app.App, req sendDelegateRequest) (any
 	jid, _ := parseGroupJID(req.GroupJID)
 	enabled := *req.Enable
 	var err error
-	if req.SubAction == "announce-only" {
+	switch req.SubAction {
+	case "announce-only":
 		err = a.WA().SetGroupAnnounce(ctx, jid, enabled)
-	} else {
+	case "locked":
 		err = a.WA().SetGroupLocked(ctx, jid, enabled)
+	case "join-approval":
+		err = a.WA().SetGroupJoinApprovalMode(ctx, jid, enabled)
+	case "member-add":
+		err = a.WA().SetGroupMemberAddMode(ctx, jid, enabled)
 	}
 	if err != nil {
 		return nil, err

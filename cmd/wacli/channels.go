@@ -22,6 +22,9 @@ func newChannelsCmd(flags *rootFlags) *cobra.Command {
 	cmd.AddCommand(newChannelsInfoCmd(flags))
 	cmd.AddCommand(newChannelsJoinCmd(flags))
 	cmd.AddCommand(newChannelsLeaveCmd(flags))
+	cmd.AddCommand(newChannelsMuteCmd(flags, true))
+	cmd.AddCommand(newChannelsMuteCmd(flags, false))
+	cmd.AddCommand(newChannelsCreateCmd(flags))
 	return cmd
 }
 

@@ -19,6 +19,7 @@ func newCallsCmd(flags *rootFlags) *cobra.Command {
 		Short: "List WhatsApp call events from the local DB",
 	}
 	cmd.AddCommand(newCallsListCmd(flags))
+	cmd.AddCommand(newCallsRejectCmd(flags))
 	return cmd
 }
 

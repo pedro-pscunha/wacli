@@ -86,6 +86,11 @@ func ensureLive(ctx context.Context, a *app.App) error {
 }
 
 func validateDelegateRequest(req sendDelegateRequest) error {
+	// Every kind that takes a file path gets an absolute one from the client. The daemon never resolves a path
+	// against its own working directory.
+	if err := requireAbsolutePath("--file", req.File); err != nil {
+		return err
+	}
 	if h, ok := delegateHandlers[req.Kind]; ok && h.validate != nil {
 		return h.validate(req)
 	}
@@ -113,6 +118,11 @@ func resultResponse(res any) (sendDelegateResponse, error) {
 	if p, ok := res.(producedID); ok {
 		resp.Sent = true
 		resp.ID = p.ProducedID()
+	}
+	// A result that found its own earlier send (a status has no row in messages) says so at the response level,
+	// where callers read already_sent.
+	if m, ok := res.(interface{ wasAlreadySent() bool }); ok && m.wasAlreadySent() {
+		resp.AlreadySent = true
 	}
 	return resp, nil
 }

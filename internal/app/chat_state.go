@@ -117,6 +117,45 @@ func (a *App) DeleteMessageForMe(ctx context.Context, info types.MessageInfo, de
 	return a.wa.DeleteMessageForMe(ctx, info, deleteMedia)
 }
 
+// StarMessage stars or unstars one message. It is a RegularHigh app-state write, so it takes the same gate as
+// DeleteMessageForMe and MuteChat.
+func (a *App) StarMessage(ctx context.Context, info types.MessageInfo, starred bool) error {
+	release, err := a.beginChatStateWrite(ctx, appstate.WAPatchRegularHigh)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := a.wa.StarMessage(ctx, info, starred); err != nil {
+		return err
+	}
+	senderJID := ""
+	if !info.Sender.IsEmpty() {
+		senderJID = canonicalJIDString(a.canonicalStoreJID(ctx, info.Sender))
+	}
+	return a.db.SetStarred(store.SetStarredParams{
+		ChatJID:   canonicalJIDString(a.canonicalStoreJID(ctx, info.Chat)),
+		MsgID:     string(info.ID),
+		SenderJID: senderJID,
+		FromMe:    info.IsFromMe,
+		Starred:   starred,
+		StarredAt: nowUTC(),
+	})
+}
+
+// DeleteChatRemote deletes the chat on the phone and every linked device. RegularHigh. The local archive stays,
+// as it does when the same delete is made on the phone: other tools read it.
+func (a *App) DeleteChatRemote(ctx context.Context, jid types.JID, deleteMedia bool) error {
+	release, err := a.beginChatStateWrite(ctx, appstate.WAPatchRegularHigh)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := a.wa.DeleteChat(ctx, jid, nowUTC(), deleteMedia); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (a *App) MuteChat(ctx context.Context, jid types.JID, mute bool, duration time.Duration) error {
 	release, err := a.beginChatStateWrite(ctx, appstate.WAPatchRegularHigh)
 	if err != nil {

@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"github.com/openclaw/wacli/internal/wa"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/openclaw/wacli/internal/out"
-	"github.com/openclaw/wacli/internal/store"
 	"github.com/spf13/cobra"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
@@ -59,93 +58,42 @@ func newSendStatusCmd(flags *rootFlags) *cobra.Command {
 			if fontSet {
 				fontPtr = &font
 			}
-			var msg *waProto.Message
-			var err error
-			if filePath == "" {
-				msg, err = buildStatusTextMessage(message, statusTextOptions{BackgroundColor: backgroundColor, Font: fontPtr})
-				if err != nil {
-					return err
-				}
-			}
 			if err := validateNewMessageID(newMsgID); err != nil {
 				return err
 			}
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 			ctx = wa.WithMessageID(ctx, newMsgID)
-
-			a, lk, err := newApp(ctx, flags, true, false)
-			if err != nil {
-				return err
-			}
-			defer closeApp(a, lk)
-
-			if err := a.EnsureAuthed(ctx); err != nil {
-				return err
-			}
-			if err := a.Connect(ctx, false, nil); err != nil {
-				return err
-			}
-			if err := warnRapidSendIfNeeded(a.StoreDir(), time.Now().UTC(), os.Stderr); err != nil {
-				return err
-			}
-
+			delegateFile := filePath
 			if filePath != "" {
-				res, err := sendFile(ctx, a, types.StatusBroadcastJID, filePath, sendFileOptions{
-					caption:      message,
-					mimeOverride: mimeOverride,
-				})
-				if err != nil {
-					return err
+				// The daemon resolves a relative path against its own directory: send it an absolute one.
+				abs, absErr := filepath.Abs(filePath)
+				if absErr != nil {
+					return absErr
 				}
-				warnSendStoreFailure(os.Stderr, res.id, res.storeWarning)
-				waitForPostSendRetryReceipts(ctx, postSendWait)
-				if flags.asJSON {
-					return out.WriteJSON(os.Stdout, addStoreWarning(map[string]any{
-						"sent":      true,
-						"to":        types.StatusBroadcastJID.String(),
-						"id":        res.id,
-						"media":     res.meta["media"],
-						"mime_type": res.meta["mime_type"],
-					}, res.storeWarning))
-				}
-				fmt.Fprintf(os.Stdout, "Sent status (id %s)\n", res.id)
-				return nil
+				delegateFile = abs
 			}
-
-			msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
-				return sendStatusTextMessage(ctx, a.WA(), msg)
-			})
+			req := sendDelegateRequest{Kind: statusPostKind, Message: message, File: delegateFile, MIME: mimeOverride,
+				BackgroundColor: backgroundColor, Font: fontPtr, NewID: newMsgID, PostSendWaitMS: durationMillis(postSendWait)}
+			res, err := callKind[actionAck](ctx, flags, req)
 			if err != nil {
 				return err
 			}
-
-			now := time.Now().UTC()
-			chat := types.StatusBroadcastJID
-			var storedFont int32
-			if fontPtr != nil {
-				storedFont = *fontPtr
-			}
-			storeErr := a.DB().UpsertStatusMessage(store.UpsertStatusMessageParams{
-				MsgID:           string(msgID),
-				Timestamp:       now,
-				FromMe:          true,
-				Text:            message,
-				BackgroundColor: backgroundColor,
-				Font:            storedFont,
-			})
-			warnSendStoreFailure(os.Stderr, string(msgID), storeErr)
-
-			waitForPostSendRetryReceipts(ctx, postSendWait)
-
 			if flags.asJSON {
-				return out.WriteJSON(os.Stdout, addStoreWarning(map[string]any{
-					"sent": true,
-					"to":   chat.String(),
-					"id":   msgID,
-				}, storeErr))
+				body := map[string]any{"sent": true, "to": res.Chat, "id": res.ID}
+				if res.Media != "" {
+					body["media"] = res.Media
+				}
+				if res.MIMEType != "" {
+					body["mime_type"] = res.MIMEType
+				}
+				if res.Audience != nil {
+					body["audience"] = res.Audience
+				}
+				addSendMetaFields(body, res.sendMeta)
+				return out.WriteJSON(os.Stdout, body)
 			}
-			fmt.Fprintf(os.Stdout, "Sent status (id %s)\n", msgID)
+			fmt.Fprintf(os.Stdout, "Sent status (id %s)\n", res.ID)
 			return nil
 		},
 	}
