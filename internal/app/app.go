@@ -128,6 +128,7 @@ type WAClient interface {
 	GetPrivacySettings(ctx context.Context) (types.PrivacySettings, error)
 	SetPrivacySetting(ctx context.Context, name types.PrivacySettingType, value types.PrivacySetting) (types.PrivacySettings, error)
 	RejectCall(ctx context.Context, from types.JID, callID string) error
+	StatusAudience(ctx context.Context) (types.StatusPrivacyType, int, error)
 }
 
 // ErrNoClient is returned by OpenWA when the app was built with NoClient.

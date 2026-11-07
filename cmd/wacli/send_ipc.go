@@ -88,27 +88,29 @@ type sendDelegateRequest struct {
 	RetryOnPhone     bool     `json:"retry_on_phone,omitempty"`
 	// Fields below are additive (socket protocol stays 1): an older daemon
 	// ignores them and rejects the new kinds as unsupported.
-	Chat         string   `json:"chat,omitempty"`
-	GroupJID     string   `json:"group_jid,omitempty"`
-	Users        []string `json:"users,omitempty"`
-	SubAction    string   `json:"sub_action,omitempty"`
-	Topic        *string  `json:"topic,omitempty"`
-	Code         string   `json:"code,omitempty"`
-	About        string   `json:"about,omitempty"`
-	Picture      []byte   `json:"picture,omitempty"`
-	Preview      bool     `json:"preview,omitempty"`
-	ExistingID   string   `json:"existing_id,omitempty"`
-	DeleteMedia  bool     `json:"delete_media,omitempty"`
-	Announce     bool     `json:"announce,omitempty"`
-	Locked       bool     `json:"locked,omitempty"`
-	JoinApproval bool     `json:"join_approval,omitempty"`
-	Parent       bool     `json:"parent,omitempty"`
-	LinkedParent string   `json:"linked_parent,omitempty"`
-	Count        int      `json:"count,omitempty"`
-	Requests     int      `json:"requests,omitempty"`
-	WaitMS       int64    `json:"wait_ms,omitempty"`
-	Limit        int      `json:"limit,omitempty"`
-	Workers      int      `json:"workers,omitempty"`
+	Chat        string   `json:"chat,omitempty"`
+	GroupJID    string   `json:"group_jid,omitempty"`
+	Users       []string `json:"users,omitempty"`
+	SubAction   string   `json:"sub_action,omitempty"`
+	Topic       *string  `json:"topic,omitempty"`
+	Code        string   `json:"code,omitempty"`
+	About       string   `json:"about,omitempty"`
+	Picture     []byte   `json:"picture,omitempty"`
+	Preview     bool     `json:"preview,omitempty"`
+	ExistingID  string   `json:"existing_id,omitempty"`
+	DeleteMedia bool     `json:"delete_media,omitempty"`
+	// PurgeLocal makes chat_delete drop the local archive of the chat too. The gateway never sets it.
+	PurgeLocal   bool   `json:"purge_local,omitempty"`
+	Announce     bool   `json:"announce,omitempty"`
+	Locked       bool   `json:"locked,omitempty"`
+	JoinApproval bool   `json:"join_approval,omitempty"`
+	Parent       bool   `json:"parent,omitempty"`
+	LinkedParent string `json:"linked_parent,omitempty"`
+	Count        int    `json:"count,omitempty"`
+	Requests     int    `json:"requests,omitempty"`
+	WaitMS       int64  `json:"wait_ms,omitempty"`
+	Limit        int    `json:"limit,omitempty"`
+	Workers      int    `json:"workers,omitempty"`
 	// Alias and Tag belong to the contact_alias and contact_tag kinds (the contact is in To).
 	Alias      string `json:"alias,omitempty"`
 	Tag        string `json:"tag,omitempty"`
@@ -457,16 +459,6 @@ func serveDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateE
 		_ = json.NewEncoder(conn).Encode(resp)
 		return
 	}
-	if skipsSendQueue(req.Kind) {
-		// These kinds only read: they neither queue behind sends nor take a
-		// paced send slot, and a stalled send must not hide the daemon.
-		resp, err := execute(requestCtx, req)
-		if err != nil {
-			resp = sendDelegateResponse{OK: false, Error: err.Error()}
-		}
-		_ = json.NewEncoder(conn).Encode(resp)
-		return
-	}
 	if isAppStateKind(req.Kind) {
 		// App-state writes are serialized by the app and can wait minutes on
 		// recovery, so they must not hold the send queue.
@@ -476,6 +468,16 @@ func serveDelegateConn(ctx context.Context, conn net.Conn, execute sendDelegateE
 		}
 		resp, err := execute(requestCtx, req)
 		writeDelegateResult(conn, requestCtx, req, resp, err)
+		return
+	}
+	if skipsSendQueue(req.Kind) {
+		// These kinds only read: they neither queue behind sends nor take a
+		// paced send slot, and a stalled send must not hide the daemon.
+		resp, err := execute(requestCtx, req)
+		if err != nil {
+			resp = sendDelegateResponse{OK: false, Error: err.Error()}
+		}
+		_ = json.NewEncoder(conn).Encode(resp)
 		return
 	}
 	if req.Kind == presenceSubscribeKind {

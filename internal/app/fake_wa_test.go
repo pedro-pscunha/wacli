@@ -1085,3 +1085,7 @@ func (f *fakeWA) SetPrivacySetting(context.Context, types.PrivacySettingType, ty
 	return types.PrivacySettings{}, nil
 }
 func (f *fakeWA) RejectCall(context.Context, types.JID, string) error { return nil }
+
+func (f *fakeWA) StatusAudience(context.Context) (types.StatusPrivacyType, int, error) {
+	return types.StatusPrivacyTypeContacts, 0, nil
+}

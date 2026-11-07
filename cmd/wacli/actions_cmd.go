@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/openclaw/wacli/internal/out"
@@ -13,9 +14,14 @@ import (
 // The commands in this file are the CLI face of the account-action kinds in delegate_actions.go. Each one is a
 // callKind: it runs on the sync daemon, or is refused on a pinned store with no daemon. None connects by itself.
 
+// readOnlyActionKinds are the kinds that only read the account: they are allowed under --read-only.
+var readOnlyActionKinds = map[string]bool{blocklistKind: true, privacyGetKind: true}
+
 func runActionKind(flags *rootFlags, req sendDelegateRequest, text string) error {
-	if err := flags.requireWritable(); err != nil {
-		return err
+	if !readOnlyActionKinds[req.Kind] {
+		if err := flags.requireWritable(); err != nil {
+			return err
+		}
 	}
 	ctx, cancel := withTimeout(context.Background(), flags)
 	defer cancel()
@@ -48,7 +54,28 @@ func runActionKind(flags *rootFlags, req sendDelegateRequest, text string) error
 		addSendMetaFields(body, res.sendMeta)
 		return out.WriteJSON(os.Stdout, body)
 	}
-	fmt.Fprintln(os.Stdout, text)
+	switch {
+	case res.JIDs != nil:
+		for _, j := range res.JIDs {
+			fmt.Fprintln(os.Stdout, j)
+		}
+		if len(res.JIDs) == 0 {
+			fmt.Fprintln(os.Stdout, "No blocked contacts.")
+		}
+	case req.Kind == privacyGetKind || req.Kind == privacySetKind:
+		if m, ok := res.Settings.(map[string]any); ok {
+			keys := make([]string, 0, len(m))
+			for k := range m {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				fmt.Fprintf(os.Stdout, "%s: %v\n", k, m[k])
+			}
+		}
+	default:
+		fmt.Fprintln(os.Stdout, text)
+	}
 	return nil
 }
 
@@ -163,7 +190,7 @@ func newGroupsPhotoCmd(flags *rootFlags) *cobra.Command {
 			if remove {
 				req.SubAction = "remove"
 			} else {
-				data, err := readSendFileData(file)
+				data, err := readPictureFile(file)
 				if err != nil {
 					return err
 				}
@@ -176,6 +203,11 @@ func newGroupsPhotoCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&file, "file", "", "JPEG file")
 	cmd.Flags().BoolVar(&remove, "remove", false, "remove the picture")
 	return cmd
+}
+
+// readPictureFile reads a group picture, refusing anything over the picture limit before it reads the file.
+func readPictureFile(path string) ([]byte, error) {
+	return readRegularFileLimitedWithOpener(path, profileMaxPictureBytes, openOutboundMedia)
 }
 
 func newGroupsJoinApprovalCmd(flags *rootFlags) *cobra.Command {
@@ -317,7 +349,7 @@ func newPrivacyCmd(flags *rootFlags) *cobra.Command {
 			return runActionKind(flags, sendDelegateRequest{Kind: privacySetKind, Name: name, Label: value}, "OK")
 		},
 	}
-	set.Flags().StringVar(&name, "name", "", "groupadd, last, status, profile, readreceipts, online, calladd, messages, defense or stickers")
+	set.Flags().StringVar(&name, "name", "", "groupadd, last, status (the About text visibility, NOT who sees your status posts), profile, readreceipts, online, calladd, messages, defense or stickers")
 	set.Flags().StringVar(&value, "value", "", "all, contacts, contact_blacklist, none, match_last_seen, known, on_standard, off or contact_allowlist, as the setting allows")
 	cmd.AddCommand(set)
 	return cmd

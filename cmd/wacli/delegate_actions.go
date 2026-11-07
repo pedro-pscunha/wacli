@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"image/jpeg"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -58,6 +61,15 @@ type actionAck struct {
 	PictureID string   `json:"picture_id,omitempty"`
 	JIDs      []string `json:"jids,omitempty"`
 	Settings  any      `json:"settings,omitempty"`
+	// Audience says who a status post reaches (status_post only).
+	Audience *statusAudience `json:"audience,omitempty"`
+	Media    string          `json:"media,omitempty"`
+	MIMEType string          `json:"mime_type,omitempty"`
+}
+
+type statusAudience struct {
+	Type  string `json:"type"`
+	Count int    `json:"count"`
 }
 
 // sentAck is the answer of a kind that put a message on the wire: ProducedID makes the response carry sent and
@@ -229,7 +241,7 @@ func runBlocklist(ctx context.Context, a *app.App, _ sendDelegateRequest) (any, 
 	out := actionAck{JIDs: []string{}}
 	if list != nil {
 		for _, it := range list.Items {
-			if !it.Active && it.PN.IsEmpty() && it.LID.IsEmpty() {
+			if !it.Active || (it.PN.IsEmpty() && it.LID.IsEmpty()) {
 				continue
 			}
 			j := it.PN
@@ -267,8 +279,12 @@ func validateJPEG(b []byte) error {
 	if len(b) > profileMaxPictureBytes {
 		return fmt.Errorf("picture is larger than %d bytes", profileMaxPictureBytes)
 	}
-	if len(b) < 3 || b[0] != 0xFF || b[1] != 0xD8 {
+	if len(b) < 3 || b[0] != 0xFF || b[1] != 0xD8 || b[2] != 0xFF {
 		return fmt.Errorf("picture must be a JPEG")
+	}
+	// The header must decode: a file that starts like a JPEG but is not one is refused here, not by the server.
+	if _, err := jpeg.DecodeConfig(bytes.NewReader(b)); err != nil {
+		return fmt.Errorf("picture must be a JPEG: %w", err)
 	}
 	return nil
 }
@@ -359,7 +375,20 @@ func runDisappearingDefault(ctx context.Context, a *app.App, r sendDelegateReque
 
 // ---- status (stories) ----
 
+// requireAbsolutePath refuses a path the daemon would resolve against its own working directory. The client makes
+// the path absolute before it delegates (send file, sticker, voice and status all do); this is the daemon's guard
+// against a client that did not.
+func requireAbsolutePath(flag, path string) error {
+	if strings.TrimSpace(path) != "" && !filepath.IsAbs(path) {
+		return fmt.Errorf("%s must be an absolute path, got %q", flag, path)
+	}
+	return nil
+}
+
 func validateStatusPost(r sendDelegateRequest) error {
+	if err := requireAbsolutePath("--file", r.File); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.File) == "" {
 		if strings.TrimSpace(r.Message) == "" {
 			return fmt.Errorf("a status needs text (--message) or a file")
@@ -402,7 +431,10 @@ func runStatusPost(ctx context.Context, a *app.App, r sendDelegateRequest) (any,
 		if err != nil {
 			return nil, err
 		}
-		return sentAck{actionAck{ID: res.id, Chat: types.StatusBroadcastJID.String()}}, nil
+		waitForPostSendRetryReceipts(ctx, millisDuration(r.PostSendWaitMS, 0))
+		ack := actionAck{ID: res.id, Chat: types.StatusBroadcastJID.String(), Media: res.meta["media"], MIMEType: res.meta["mime_type"]}
+		ack.Audience = statusAudienceOf(ctx, a)
+		return sentAck{ack}, nil
 	}
 	var font *int32
 	if r.Font != nil {
@@ -428,10 +460,34 @@ func runStatusPost(ctx context.Context, a *app.App, r sendDelegateRequest) (any,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: status %s sent but not stored: %v\n", id, err)
 	}
-	return sentAck{actionAck{ID: string(id), Chat: types.StatusBroadcastJID.String()}}, nil
+	waitForPostSendRetryReceipts(ctx, millisDuration(r.PostSendWaitMS, 0))
+	ack := actionAck{ID: string(id), Chat: types.StatusBroadcastJID.String()}
+	ack.Audience = statusAudienceOf(ctx, a)
+	return sentAck{ack}, nil
+}
+
+// statusAudienceOf reads who the post reached, after the send. A failure here does not fail the post: the post is
+// out, so the answer leaves the audience empty and the caller sees that it could not be read.
+func statusAudienceOf(ctx context.Context, a *app.App) *statusAudience {
+	typ, n, err := a.WA().StatusAudience(ctx)
+	if err != nil && typ == "" {
+		return nil
+	}
+	return &statusAudience{Type: string(typ), Count: n}
 }
 
 func runStatusDelete(ctx context.Context, a *app.App, r sendDelegateRequest) (any, error) {
+	// A revoke goes to the whole status audience: only a status this account posted, as the store knows it.
+	st, err := a.DB().GetStatusMessage(r.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%s is not one of your statuses in this store", r.ID)
+		}
+		return nil, err
+	}
+	if !st.FromMe {
+		return nil, fmt.Errorf("%s is not one of your statuses in this store", r.ID)
+	}
 	if err := ensureLive(ctx, a); err != nil {
 		return nil, err
 	}
@@ -520,7 +576,7 @@ func runChatDelete(ctx context.Context, a *app.App, r sendDelegateRequest) (any,
 	if err := ensureLive(ctx, a); err != nil {
 		return nil, err
 	}
-	if err := a.DeleteChatRemote(ctx, jid, r.DeleteMedia); err != nil {
+	if err := a.DeleteChatRemote(ctx, jid, r.DeleteMedia, r.PurgeLocal); err != nil {
 		return nil, fmt.Errorf("delete chat: %w", err)
 	}
 	return actionAck{Chat: jid.String(), Deleted: boolPtr(true)}, nil

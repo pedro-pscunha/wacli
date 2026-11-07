@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/openclaw/wacli/internal/wa"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -63,15 +64,32 @@ func newSendStatusCmd(flags *rootFlags) *cobra.Command {
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 			ctx = wa.WithMessageID(ctx, newMsgID)
-			req := sendDelegateRequest{Kind: statusPostKind, Message: message, File: filePath, MIME: mimeOverride,
-				BackgroundColor: backgroundColor, Font: fontPtr, NewID: newMsgID}
+			delegateFile := filePath
+			if filePath != "" {
+				// The daemon resolves a relative path against its own directory: send it an absolute one.
+				abs, absErr := filepath.Abs(filePath)
+				if absErr != nil {
+					return absErr
+				}
+				delegateFile = abs
+			}
+			req := sendDelegateRequest{Kind: statusPostKind, Message: message, File: delegateFile, MIME: mimeOverride,
+				BackgroundColor: backgroundColor, Font: fontPtr, NewID: newMsgID, PostSendWaitMS: durationMillis(postSendWait)}
 			res, err := callKind[actionAck](ctx, flags, req)
 			if err != nil {
 				return err
 			}
-			waitForPostSendRetryReceipts(ctx, postSendWait)
 			if flags.asJSON {
 				body := map[string]any{"sent": true, "to": res.Chat, "id": res.ID}
+				if res.Media != "" {
+					body["media"] = res.Media
+				}
+				if res.MIMEType != "" {
+					body["mime_type"] = res.MIMEType
+				}
+				if res.Audience != nil {
+					body["audience"] = res.Audience
+				}
 				addSendMetaFields(body, res.sendMeta)
 				return out.WriteJSON(os.Stdout, body)
 			}

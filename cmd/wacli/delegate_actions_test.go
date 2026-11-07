@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"image"
+	"image/jpeg"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,6 +26,15 @@ func jpegBytes(n int) []byte {
 
 func tr(b bool) *bool { return &b }
 
+func realJPEG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 8, 8)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 // Every new kind refuses bad input before any I/O, and the daemon runs the good ones on its connection.
 func TestActionKindValidators(t *testing.T) {
 	cases := map[string]struct {
@@ -39,7 +52,7 @@ func TestActionKindValidators(t *testing.T) {
 		"block ok":               {sendDelegateRequest{Kind: contactBlockKind, To: "+55 11 99999-9999", SubAction: "block"}, ""},
 		"block group jid":        {sendDelegateRequest{Kind: contactBlockKind, To: actionGroup, SubAction: "block"}, "phone number or a user JID"},
 		"block bad action":       {sendDelegateRequest{Kind: contactBlockKind, To: actionDM, SubAction: "mute"}, "block|unblock"},
-		"photo ok":               {sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: jpegBytes(10)}, ""},
+		"photo ok":               {sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: realJPEG(t)}, ""},
 		"photo remove ok":        {sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, SubAction: "remove"}, ""},
 		"photo remove with data": {sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, SubAction: "remove", Picture: jpegBytes(10)}, "cannot be sent"},
 		"photo png":              {sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: []byte{0x89, 'P', 'N', 'G'}}, "JPEG"},
@@ -57,6 +70,9 @@ func TestActionKindValidators(t *testing.T) {
 		"status empty":           {sendDelegateRequest{Kind: statusPostKind}, "needs text"},
 		"status bad color":       {sendDelegateRequest{Kind: statusPostKind, Message: "x", BackgroundColor: "red"}, "background-color"},
 		"status file with color": {sendDelegateRequest{Kind: statusPostKind, File: "/tmp/a.jpg", BackgroundColor: "#112233"}, "text status only"},
+		"status relative file":   {sendDelegateRequest{Kind: statusPostKind, File: "foto.jpg"}, "absolute path"},
+		"file kind relative":     {sendDelegateRequest{Kind: "file", To: actionDM, File: "foto.jpg"}, "absolute path"},
+		"photo fake jpeg":        {sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: jpegBytes(10)}, "JPEG"},
 		"status delete no id":    {sendDelegateRequest{Kind: statusDeleteKind}, "--id"},
 		"channel mute ok":        {sendDelegateRequest{Kind: channelMuteKind, To: actionChanel, Enable: tr(true)}, ""},
 		"channel mute group":     {sendDelegateRequest{Kind: channelMuteKind, To: actionGroup, Enable: tr(true)}, "channel"},
@@ -147,7 +163,7 @@ func TestDaemonRunsActionKinds(t *testing.T) {
 	}
 
 	// group photo and the two new group settings
-	if r := fx.call(t, sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: jpegBytes(64)}); !r.OK || !strings.Contains(string(r.Data), "pic1") {
+	if r := fx.call(t, sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: realJPEG(t)}); !r.OK || !strings.Contains(string(r.Data), "pic1") {
 		t.Fatalf("photo = %+v data=%s", r, r.Data)
 	}
 	if r := fx.call(t, sendDelegateRequest{Kind: groupPhotoKind, GroupJID: actionGroup, SubAction: "remove"}); !r.OK || !strings.Contains(string(r.Data), "remove") {
@@ -202,8 +218,16 @@ func TestDaemonRunsActionKinds(t *testing.T) {
 	if f.actions.deletes != 1 {
 		t.Fatalf("deletes = %d", f.actions.deletes)
 	}
+	// The local archive stays, as it does when the chat is deleted on the phone.
+	if _, err := db.GetMessage(actionDM, "TARGET000001"); err != nil {
+		t.Fatalf("chat_delete removed the local archive: %v", err)
+	}
+	// Only an explicit purge_local drops it.
+	if r := fx.call(t, sendDelegateRequest{Kind: chatDeleteKind, Chat: actionDM, PurgeLocal: true}); !r.OK {
+		t.Fatalf("chat delete with purge = %+v", r)
+	}
 	if _, err := db.GetMessage(actionDM, "TARGET000001"); err == nil {
-		t.Fatal("the local copy of the deleted chat is still there")
+		t.Fatal("purge_local did not drop the local copy")
 	}
 	fx.noRedial(t)
 }
@@ -226,7 +250,13 @@ func TestDaemonStatusPostAndDelete(t *testing.T) {
 	if !r.OK || !r.AlreadySent || len(f.protoSends) != 1 {
 		t.Fatalf("repeat = %+v sends=%d, want already_sent and no new send", r, len(f.protoSends))
 	}
-	// delete: revoke on status@broadcast
+	if !strings.Contains(string(fx.call(t, sendDelegateRequest{Kind: statusPostKind, Message: "outro", NewID: "STATUSID0002"}).Data), `"audience":{"type":"contacts","count":42}`) {
+		t.Fatal("status_post did not report its audience")
+	}
+	// delete: only an own status the store knows
+	if r := fx.call(t, sendDelegateRequest{Kind: statusDeleteKind, ID: "SOMEONEELSE1"}); r.OK || f.revokes != 0 {
+		t.Fatalf("revoked a status that is not ours: %+v revokes=%d", r, f.revokes)
+	}
 	r = fx.call(t, sendDelegateRequest{Kind: statusDeleteKind, ID: "STATUSID0001"})
 	if !r.OK || f.revokes != 1 {
 		t.Fatalf("status delete = %+v revokes=%d", r, f.revokes)
@@ -242,7 +272,7 @@ func TestActionKindsRefuseWhenDisconnectedAndNeverDial(t *testing.T) {
 	for _, req := range []sendDelegateRequest{
 		{Kind: messageStarKind, Chat: actionDM, ID: "TARGET000001", Enable: tr(true)},
 		{Kind: contactBlockKind, To: actionDM, SubAction: "block"},
-		{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: jpegBytes(8)},
+		{Kind: groupPhotoKind, GroupJID: actionGroup, Picture: realJPEG(t)},
 		{Kind: privacySetKind, Name: "last", Label: "none"},
 		{Kind: chatDeleteKind, Chat: actionDM},
 		{Kind: statusPostKind, Message: "x"},
@@ -344,5 +374,54 @@ func TestActionCommandsRouteToTheirKind(t *testing.T) {
 		if !strings.Contains(stdout, `"ok":true`) && !strings.Contains(stdout, `"sent":true`) {
 			t.Errorf("%v: stdout = %q", c.args, stdout)
 		}
+	}
+}
+
+// m5: the two app-state writers answer through the "may have gone through" path.
+func TestStarAndChatDeleteAreAppStateKinds(t *testing.T) {
+	for _, k := range []string{messageStarKind, chatDeleteKind} {
+		if !isAppStateKind(k) {
+			t.Errorf("%s writes app state and must be in isAppStateKind", k)
+		}
+	}
+}
+
+// m8: the two read kinds run under --read-only; the writes do not.
+func TestReadOnlyAllowsOnlyTheReadActionKinds(t *testing.T) {
+	flags := &rootFlags{readOnly: true}
+	for _, c := range []struct {
+		run   func() error
+		write bool
+	}{
+		{func() error {
+			return runActionKind(flags, sendDelegateRequest{Kind: chatDeleteKind, Chat: actionDM}, "OK")
+		}, true},
+		{func() error {
+			return runActionKind(flags, sendDelegateRequest{Kind: privacySetKind, Name: "last", Label: "none"}, "OK")
+		}, true},
+	} {
+		if err := c.run(); err == nil || !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("write under --read-only: err = %v", err)
+		}
+	}
+	if !readOnlyActionKinds[blocklistKind] || !readOnlyActionKinds[privacyGetKind] || len(readOnlyActionKinds) != 2 {
+		t.Fatalf("readOnlyActionKinds = %v", readOnlyActionKinds)
+	}
+}
+
+// M1: a relative --file on the command line reaches the daemon as an absolute path.
+func TestSendStatusFileGoesToTheDaemonAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "foto.jpg"), realJPEG(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	req, _ := runKindViaSocket(t, `{"ok":true}`, "", "send", "status", "--file", "foto.jpg", "--post-send-wait", "0")
+	if !filepath.IsAbs(req.File) || filepath.Base(req.File) != "foto.jpg" {
+		t.Fatalf("daemon received file %q, want an absolute path to foto.jpg", req.File)
 	}
 }

@@ -278,6 +278,7 @@ func (f *daemonFakeWA) HasLocalAppState(context.Context, string) (bool, error) {
 // actionLog records the account actions of delegate_actions.go.
 type actionLog struct {
 	stars, pins, blocks, unblocks, photos, joinApprovals, memberAdds, disappearing, defaultDisappearing int
+	audienceReads                                                                                       int
 	mutes, creates, deletes, privacySets, privacyGets, rejects, blocklistReads                          int
 	lastPinDuration                                                                                     time.Duration
 	lastPinFromMe                                                                                       bool
@@ -393,4 +394,11 @@ func (f *daemonFakeWA) RejectCall(context.Context, types.JID, string) error {
 	defer f.mu.Unlock()
 	f.actions.rejects++
 	return nil
+}
+
+func (f *daemonFakeWA) StatusAudience(context.Context) (types.StatusPrivacyType, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions.audienceReads++
+	return types.StatusPrivacyTypeContacts, 42, nil
 }

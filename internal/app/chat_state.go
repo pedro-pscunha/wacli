@@ -142,8 +142,10 @@ func (a *App) StarMessage(ctx context.Context, info types.MessageInfo, starred b
 	})
 }
 
-// DeleteChatRemote deletes the chat on the phone and every linked device, then drops the local copy. RegularHigh.
-func (a *App) DeleteChatRemote(ctx context.Context, jid types.JID, deleteMedia bool) error {
+// DeleteChatRemote deletes the chat on the phone and every linked device. RegularHigh. The local archive stays,
+// as it does when the same delete is made on the phone: other tools read it. purgeLocal drops the canonical chat
+// row and its messages too; the gateway never sets it.
+func (a *App) DeleteChatRemote(ctx context.Context, jid types.JID, deleteMedia, purgeLocal bool) error {
 	release, err := a.beginChatStateWrite(ctx, appstate.WAPatchRegularHigh)
 	if err != nil {
 		return err
@@ -151,6 +153,9 @@ func (a *App) DeleteChatRemote(ctx context.Context, jid types.JID, deleteMedia b
 	defer release()
 	if err := a.wa.DeleteChat(ctx, jid, nowUTC(), deleteMedia); err != nil {
 		return err
+	}
+	if !purgeLocal {
+		return nil
 	}
 	return a.db.DeleteChat(canonicalJIDString(a.canonicalStoreJID(ctx, jid)))
 }

@@ -7,7 +7,6 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
-	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -43,30 +42,31 @@ func (c *Client) StarMessage(ctx context.Context, info types.MessageInfo, starre
 	return cli.SendAppState(ctx, appstate.BuildStar(info.Chat, sender, info.ID, info.IsFromMe, starred))
 }
 
-// PinInChat pins or unpins a message inside a chat for everyone. It is a message on the wire.
+// PinInChat pins or unpins a message inside a chat for everyone. It is a message on the wire, and the server
+// cannot read it: success means "sent", not "applied". A recipient that cannot apply the pin drops it silently.
 func (c *Client) PinInChat(ctx context.Context, chat types.JID, sender types.JID, fromMe bool, id types.MessageID, pin bool, duration time.Duration) (types.MessageID, error) {
 	cli, err := c.live()
 	if err != nil {
 		return "", err
 	}
-	key := &waCommon.MessageKey{RemoteJID: proto.String(chat.String()), FromMe: proto.Bool(fromMe), ID: proto.String(string(id))}
-	if !fromMe && chat.Server == types.GroupServer && !sender.IsEmpty() {
-		key.Participant = proto.String(sender.ToNonAD().String())
+	if fromMe {
+		sender = types.EmptyJID // BuildMessageKey reads an empty sender as the account's own message
 	}
 	kind := waE2E.PinInChatMessage_PIN_FOR_ALL
 	if !pin {
 		kind = waE2E.PinInChatMessage_UNPIN_FOR_ALL
 	}
-	msg := &waE2E.Message{PinInChatMessage: &waE2E.PinInChatMessage{
-		Key:               key,
-		Type:              kind.Enum(),
-		SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
-	}}
-	if pin && duration > 0 {
-		msg.MessageContextInfo = &waE2E.MessageContextInfo{
-			MessageAddOnDurationInSecs: proto.Uint32(uint32(duration.Seconds())),
-			MessageAddOnExpiryType:     waE2E.MessageContextInfo_STATIC.Enum(),
-		}
+	if !pin {
+		duration = 0
+	}
+	msg := &waE2E.Message{
+		PinInChatMessage: &waE2E.PinInChatMessage{
+			Key:               cli.BuildMessageKey(chat, sender, id),
+			Type:              kind.Enum(),
+			SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
+		},
+		// Like WhatsApp Web and Baileys: the duration only, 0 on unpin, no expiry type.
+		MessageContextInfo: &waE2E.MessageContextInfo{MessageAddOnDurationInSecs: proto.Uint32(uint32(duration.Seconds()))},
 	}
 	markDispatched(ctx)
 	resp, err := cli.SendMessage(ctx, chat, msg, sendExtras(ctx, "")...)
@@ -74,6 +74,48 @@ func (c *Client) PinInChat(ctx context.Context, chat types.JID, sender types.JID
 		return "", err
 	}
 	return resp.ID, nil
+}
+
+// StatusAudience says who a status post reaches, with the rule whatsmeow uses to build the recipient list:
+// a whitelist is that list; contacts and blacklist are the address-book contacts that have a full name, minus
+// the blacklist. It sends one IQ (the status privacy) and reads the session store.
+func (c *Client) StatusAudience(ctx context.Context) (types.StatusPrivacyType, int, error) {
+	cli, err := c.live()
+	if err != nil {
+		return "", 0, err
+	}
+	opts, err := cli.GetStatusPrivacy(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	if len(opts) == 0 {
+		return types.StatusPrivacyTypeContacts, 0, fmt.Errorf("no status privacy in the answer")
+	}
+	p := opts[0]
+	if p.Type == types.StatusPrivacyTypeWhitelist {
+		return p.Type, len(p.List), nil
+	}
+	if cli.Store == nil || cli.Store.Contacts == nil {
+		return p.Type, 0, fmt.Errorf("contacts store not available")
+	}
+	contacts, err := cli.Store.Contacts.GetAllContacts(ctx)
+	if err != nil {
+		return p.Type, 0, err
+	}
+	skip := map[types.JID]struct{}{}
+	if p.Type == types.StatusPrivacyTypeBlacklist {
+		for _, j := range p.List {
+			skip[j] = struct{}{}
+		}
+	}
+	n := 0
+	for jid, ci := range contacts {
+		if _, no := skip[jid]; no || len(ci.FullName) == 0 {
+			continue
+		}
+		n++
+	}
+	return p.Type, n, nil
 }
 
 // UpdateBlocklist blocks or unblocks one contact and returns the new list.

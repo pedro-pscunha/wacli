@@ -86,6 +86,11 @@ func ensureLive(ctx context.Context, a *app.App) error {
 }
 
 func validateDelegateRequest(req sendDelegateRequest) error {
+	// Every kind that takes a file path gets an absolute one from the client. The daemon never resolves a path
+	// against its own working directory.
+	if err := requireAbsolutePath("--file", req.File); err != nil {
+		return err
+	}
 	if h, ok := delegateHandlers[req.Kind]; ok && h.validate != nil {
 		return h.validate(req)
 	}
