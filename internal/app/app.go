@@ -112,6 +112,22 @@ type WAClient interface {
 	SetStatusMessage(ctx context.Context, msg string) error
 	SetProfileName(ctx context.Context, name string) error
 	GetBusinessProfile(ctx context.Context, jid types.JID) (*types.BusinessProfile, error)
+
+	StarMessage(ctx context.Context, info types.MessageInfo, starred bool) error
+	PinInChat(ctx context.Context, chat, sender types.JID, fromMe bool, id types.MessageID, pin bool, duration time.Duration) (types.MessageID, error)
+	UpdateBlocklist(ctx context.Context, jid types.JID, block bool) (*types.Blocklist, error)
+	GetBlocklist(ctx context.Context) (*types.Blocklist, error)
+	SetGroupPhoto(ctx context.Context, jid types.JID, avatar []byte) (string, error)
+	SetGroupJoinApprovalMode(ctx context.Context, jid types.JID, on bool) error
+	SetGroupMemberAddMode(ctx context.Context, jid types.JID, allMembers bool) error
+	SetDisappearingTimer(ctx context.Context, chat types.JID, timer time.Duration) error
+	SetDefaultDisappearingTimer(ctx context.Context, timer time.Duration) error
+	NewsletterToggleMute(ctx context.Context, jid types.JID, mute bool) error
+	CreateNewsletter(ctx context.Context, name, description string) (*types.NewsletterMetadata, error)
+	DeleteChat(ctx context.Context, chat types.JID, lastMsgTS time.Time, deleteMedia bool) error
+	GetPrivacySettings(ctx context.Context) (types.PrivacySettings, error)
+	SetPrivacySetting(ctx context.Context, name types.PrivacySettingType, value types.PrivacySetting) (types.PrivacySettings, error)
+	RejectCall(ctx context.Context, from types.JID, callID string) error
 }
 
 // ErrNoClient is returned by OpenWA when the app was built with NoClient.
