@@ -48,6 +48,7 @@ type daemonFakeWA struct {
 	rewriteOnWhatsApp func(phone string) (types.JID, bool)
 
 	actions       actionLog
+	audienceErr   error
 	userInfoCalls int
 	lidMap        map[string]string // lid user -> pn user, learned while the daemon runs
 }
@@ -400,5 +401,8 @@ func (f *daemonFakeWA) StatusAudience(context.Context) (types.StatusPrivacyType,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.actions.audienceReads++
+	if f.audienceErr != nil {
+		return types.StatusPrivacyTypeContacts, 0, f.audienceErr
+	}
 	return types.StatusPrivacyTypeContacts, 42, nil
 }

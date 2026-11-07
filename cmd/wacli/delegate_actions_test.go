@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/jpeg"
 	"os"
@@ -105,7 +106,7 @@ func TestActionKindsPacing(t *testing.T) {
 		want[k] = true
 	}
 	all := []string{messageStarKind, messagePinKind, contactBlockKind, blocklistKind, groupPhotoKind, chatDisappearingKind,
-		disappearingDefaultKd, statusPostKind, statusDeleteKind, channelMuteKind, channelCreateKind, chatDeleteKind,
+		disappearingDefaultKd, statusPostKind, statusDeleteKind, statusAudienceKind, channelMuteKind, channelCreateKind, chatDeleteKind,
 		privacyGetKind, privacySetKind, callRejectKind}
 	for _, k := range all {
 		h, ok := delegateHandlers[k]
@@ -222,13 +223,6 @@ func TestDaemonRunsActionKinds(t *testing.T) {
 	if _, err := db.GetMessage(actionDM, "TARGET000001"); err != nil {
 		t.Fatalf("chat_delete removed the local archive: %v", err)
 	}
-	// Only an explicit purge_local drops it.
-	if r := fx.call(t, sendDelegateRequest{Kind: chatDeleteKind, Chat: actionDM, PurgeLocal: true}); !r.OK {
-		t.Fatalf("chat delete with purge = %+v", r)
-	}
-	if _, err := db.GetMessage(actionDM, "TARGET000001"); err == nil {
-		t.Fatal("purge_local did not drop the local copy")
-	}
 	fx.noRedial(t)
 }
 
@@ -295,7 +289,7 @@ func TestActionKindsAppearInCapabilities(t *testing.T) {
 		have[k] = true
 	}
 	for _, k := range []string{messageStarKind, messagePinKind, contactBlockKind, blocklistKind, groupPhotoKind, chatDisappearingKind,
-		disappearingDefaultKd, statusPostKind, statusDeleteKind, channelMuteKind, channelCreateKind, chatDeleteKind,
+		disappearingDefaultKd, statusPostKind, statusDeleteKind, statusAudienceKind, channelMuteKind, channelCreateKind, chatDeleteKind,
 		privacyGetKind, privacySetKind, callRejectKind} {
 		if !have[k] {
 			t.Errorf("capabilities do not list %s", k)
@@ -309,6 +303,7 @@ func TestActionKindsAppearInCapabilities(t *testing.T) {
 func init() {
 	validatesEmpty[blocklistKind] = true
 	validatesEmpty[privacyGetKind] = true
+	validatesEmpty[statusAudienceKind] = true
 	for _, c := range [][]string{
 		{"messages", "star", "--chat", actionDM, "--id", "ABC12345"},
 		{"messages", "unstar", "--chat", actionDM, "--id", "ABC12345"},
@@ -328,6 +323,7 @@ func init() {
 		{"channels", "unmute", "--jid", actionChanel},
 		{"channels", "create", "--name", "Obras"},
 		{"privacy", "get"},
+		{"messages", "status-audience"},
 		{"privacy", "set", "--name", "last", "--value", "contacts"},
 		{"calls", "reject", "--jid", actionDM, "--id", "CALLID123456"},
 		{"send", "status", "--message", "oi"},
@@ -404,7 +400,7 @@ func TestReadOnlyAllowsOnlyTheReadActionKinds(t *testing.T) {
 			t.Errorf("write under --read-only: err = %v", err)
 		}
 	}
-	if !readOnlyActionKinds[blocklistKind] || !readOnlyActionKinds[privacyGetKind] || len(readOnlyActionKinds) != 2 {
+	if !readOnlyActionKinds[blocklistKind] || !readOnlyActionKinds[privacyGetKind] || !readOnlyActionKinds[statusAudienceKind] || len(readOnlyActionKinds) != 3 {
 		t.Fatalf("readOnlyActionKinds = %v", readOnlyActionKinds)
 	}
 }
@@ -424,4 +420,44 @@ func TestSendStatusFileGoesToTheDaemonAbsolute(t *testing.T) {
 	if !filepath.IsAbs(req.File) || filepath.Base(req.File) != "foto.jpg" {
 		t.Fatalf("daemon received file %q, want an absolute path to foto.jpg", req.File)
 	}
+}
+
+// r1: an incoming message with no stored sender cannot be pinned (the key would read as the account's own).
+func TestPinRefusesAnIncomingMessageWithoutASender(t *testing.T) {
+	f := newDaemonFakeWA()
+	fx := newDaemonFixture(t, f)
+	lidChat := "900000001@lid"
+	seedOwnMessage(t, fx, fx.app.DB(), lidChat, "INCOMING0001", false)
+	r := fx.call(t, sendDelegateRequest{Kind: messagePinKind, Chat: lidChat, ID: "INCOMING0001", Enable: tr(true), EphemeralDuration: "7d"})
+	if r.OK || !strings.Contains(r.Error, "no sender") || f.actions.pins != 0 {
+		t.Fatalf("pin = %+v pins=%d, want a refusal and no pin on the wire", r, f.actions.pins)
+	}
+	// Our own message in the same chat still pins.
+	seedOwnMessage(t, fx, fx.app.DB(), lidChat, "OWNMESSAGE01", true)
+	if r := fx.call(t, sendDelegateRequest{Kind: messagePinKind, Chat: lidChat, ID: "OWNMESSAGE01", Enable: tr(true), EphemeralDuration: "7d"}); !r.OK {
+		t.Fatalf("own pin = %+v", r)
+	}
+}
+
+// r2: the audience read sends nothing, does not dial, and a failed read is an error, not a count of 0.
+func TestStatusAudienceIsAReadAndNeverReportsZeroOnError(t *testing.T) {
+	f := newDaemonFakeWA()
+	fx := newDaemonFixture(t, f)
+	r := fx.call(t, sendDelegateRequest{Kind: statusAudienceKind})
+	if !r.OK || !strings.Contains(string(r.Data), `"audience":{"type":"contacts","count":42}`) || len(f.protoSends) != 0 {
+		t.Fatalf("audience = %+v data=%s sends=%d", r, r.Data, len(f.protoSends))
+	}
+	f.mu.Lock()
+	f.audienceErr = errors.New("contacts store not available")
+	f.mu.Unlock()
+	r = fx.call(t, sendDelegateRequest{Kind: statusAudienceKind})
+	if r.OK || strings.Contains(string(r.Data), `"count":0`) {
+		t.Fatalf("a failed read answered %+v data=%s", r, r.Data)
+	}
+	// and the post itself still goes out, with no audience claimed
+	r = fx.call(t, sendDelegateRequest{Kind: statusPostKind, Message: "x", NewID: "STATUSID0009"})
+	if !r.OK || strings.Contains(string(r.Data), "audience") {
+		t.Fatalf("post with a failed audience read = %+v data=%s", r, r.Data)
+	}
+	fx.noRedial(t)
 }

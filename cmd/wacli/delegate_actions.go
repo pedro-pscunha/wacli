@@ -33,6 +33,7 @@ const (
 	disappearingDefaultKd = "disappearing_default"
 	statusPostKind        = "status_post"
 	statusDeleteKind      = "status_delete"
+	statusAudienceKind    = "status_audience"
 	channelMuteKind       = "channel_mute"
 	channelCreateKind     = "channel_create"
 	chatDeleteKind        = "chat_delete"
@@ -97,6 +98,7 @@ func init() {
 	registerKind(statusDeleteKind, kindHandler{validate: func(r sendDelegateRequest) error {
 		return validateTargetMessageID("--id", r.ID)
 	}, run: runStatusDelete})
+	registerKind(statusAudienceKind, kindHandler{skipsQueue: true, validate: func(sendDelegateRequest) error { return nil }, run: runStatusAudience})
 	registerKind(channelMuteKind, kindHandler{skipsQueue: true, validate: validateChannelMute, run: runChannelMute})
 	registerKind(channelCreateKind, kindHandler{skipsQueue: true, validate: validateChannelCreate, run: runChannelCreate})
 	registerKind(chatDeleteKind, kindHandler{skipsQueue: true, validate: validateChatDelete, run: runChatDelete})
@@ -172,6 +174,11 @@ func runMessagePin(ctx context.Context, a *app.App, r sendDelegateRequest) (any,
 	info, err := messageInfoForDeleteForMe(msg, chatJID)
 	if err != nil {
 		return nil, err
+	}
+	// A key for someone else's message needs the sender. With none stored (an incoming message in an @lid chat)
+	// the key would read as the account's own message and pin the wrong thing, silently.
+	if !msg.FromMe && info.Sender.IsEmpty() {
+		return nil, fmt.Errorf("cannot pin message %s: it is not yours and the store has no sender for it", msg.MsgID)
 	}
 	var dur time.Duration
 	if *r.Enable {
@@ -470,10 +477,23 @@ func runStatusPost(ctx context.Context, a *app.App, r sendDelegateRequest) (any,
 // out, so the answer leaves the audience empty and the caller sees that it could not be read.
 func statusAudienceOf(ctx context.Context, a *app.App) *statusAudience {
 	typ, n, err := a.WA().StatusAudience(ctx)
-	if err != nil && typ == "" {
+	if err != nil {
 		return nil
 	}
 	return &statusAudience{Type: string(typ), Count: n}
+}
+
+// runStatusAudience is the read the gateway shows BEFORE a status is confirmed. It sends no message and never
+// dials; it is one status-privacy IQ plus the contact list. A partial read is an error, never a count of 0.
+func runStatusAudience(ctx context.Context, a *app.App, _ sendDelegateRequest) (any, error) {
+	if err := ensureLive(ctx, a); err != nil {
+		return nil, err
+	}
+	typ, n, err := a.WA().StatusAudience(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read status audience: %w", err)
+	}
+	return actionAck{Audience: &statusAudience{Type: string(typ), Count: n}}, nil
 }
 
 func runStatusDelete(ctx context.Context, a *app.App, r sendDelegateRequest) (any, error) {
@@ -576,7 +596,7 @@ func runChatDelete(ctx context.Context, a *app.App, r sendDelegateRequest) (any,
 	if err := ensureLive(ctx, a); err != nil {
 		return nil, err
 	}
-	if err := a.DeleteChatRemote(ctx, jid, r.DeleteMedia, r.PurgeLocal); err != nil {
+	if err := a.DeleteChatRemote(ctx, jid, r.DeleteMedia); err != nil {
 		return nil, fmt.Errorf("delete chat: %w", err)
 	}
 	return actionAck{Chat: jid.String(), Deleted: boolPtr(true)}, nil

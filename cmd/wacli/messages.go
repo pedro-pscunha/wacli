@@ -24,5 +24,6 @@ func newMessagesCmd(flags *rootFlags) *cobra.Command {
 	cmd.AddCommand(newMessagesPinCmd(flags, true))
 	cmd.AddCommand(newMessagesPinCmd(flags, false))
 	cmd.AddCommand(newMessagesStatusDeleteCmd(flags))
+	cmd.AddCommand(newMessagesStatusAudienceCmd(flags))
 	return cmd
 }

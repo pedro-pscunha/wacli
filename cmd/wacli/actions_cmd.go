@@ -15,7 +15,7 @@ import (
 // callKind: it runs on the sync daemon, or is refused on a pinned store with no daemon. None connects by itself.
 
 // readOnlyActionKinds are the kinds that only read the account: they are allowed under --read-only.
-var readOnlyActionKinds = map[string]bool{blocklistKind: true, privacyGetKind: true}
+var readOnlyActionKinds = map[string]bool{blocklistKind: true, privacyGetKind: true, statusAudienceKind: true}
 
 func runActionKind(flags *rootFlags, req sendDelegateRequest, text string) error {
 	if !readOnlyActionKinds[req.Kind] {
@@ -55,6 +55,8 @@ func runActionKind(flags *rootFlags, req sendDelegateRequest, text string) error
 		return out.WriteJSON(os.Stdout, body)
 	}
 	switch {
+	case req.Kind == statusAudienceKind && res.Audience != nil:
+		fmt.Fprintf(os.Stdout, "%s: %d people\n", res.Audience.Type, res.Audience.Count)
 	case res.JIDs != nil:
 		for _, j := range res.JIDs {
 			fmt.Fprintln(os.Stdout, j)
@@ -125,6 +127,16 @@ func newMessagesPinCmd(flags *rootFlags, pin bool) *cobra.Command {
 		use, short = "unpin", "Unpin a message in its chat"
 	}
 	return messageToggleCmd(flags, use, short, messagePinKind, pin, true)
+}
+
+func newMessagesStatusAudienceCmd(flags *rootFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status-audience",
+		Short: "Show who a status post would reach (type and count)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runActionKind(flags, sendDelegateRequest{Kind: statusAudienceKind}, "OK")
+		},
+	}
 }
 
 func newMessagesStatusDeleteCmd(flags *rootFlags) *cobra.Command {
