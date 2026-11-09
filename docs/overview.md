@@ -36,7 +36,7 @@ Read when: you need the user-facing command map, global flags, store model, or l
 - [contacts import-system](contacts-import-system.md) - import macOS Contacts names into local contact metadata.
 - [chats](chats.md) - list, show, filter, and manage known chat state.
 - [groups](groups.md) - refresh, inspect, rename, leave, join, invite, and manage participants.
-- [store](store.md) - inspect local store stats and prune stale local rows.
+- [store](store.md) - inspect local store stats, prune stale local rows, and import an old store's history.
 - [channels](channels.md) - list, inspect, join, leave, and send to WhatsApp Channels.
 - [history](history.md) - inspect archive coverage and request older per-chat history from the primary device.
 - [presence](presence.md) - send typing/paused indicators.
