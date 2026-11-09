@@ -111,3 +111,49 @@ func TestExactMediaDownloadPhoneFallbackOnlyForExpiredResponses(t *testing.T) {
 		}
 	}
 }
+
+// A row without a direct path (an old history sync, a row imported from another device's store) has no server copy:
+// with phone recovery it goes straight to the phone, without it the old refusal stands. No media key, no request.
+func TestExactMediaDownloadWithoutDirectPathAsksThePhone(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		key     []byte
+		retry   bool
+		recover bool
+	}{
+		{"phone", make([]byte, 32), true, true},
+		{"no-retry", make([]byte, 32), false, false},
+		{"no-key", nil, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, err := app.New(app.Options{StoreDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer base.Close()
+			data := []byte("a file only the phone still holds")
+			hash := sha256.Sum256(data)
+			chat, id := "111@s.whatsapp.net", "old"
+			if err := base.DB().UpsertChat(chat, "dm", "Synthetic", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := base.DB().UpsertMessage(store.UpsertMessageParams{ChatJID: chat, MsgID: id, SenderJID: chat, FromMe: true, Timestamp: time.Now(), MediaType: "image", MediaKey: tc.key, FileSHA256: hash[:], FileLength: uint64(len(data))}); err != nil {
+				t.Fatal(err)
+			}
+			a := &pipelineApp{App: base, client: &pipelineWA{}, content: data}
+			result, err := executeExactMediaDownload(context.Background(), a, chat, id, tc.retry)
+			if a.client.downloads != 0 {
+				t.Fatalf("a row without a direct path tried the server %d time(s)", a.client.downloads)
+			}
+			if !tc.recover {
+				if err == nil || a.phoneRequests != 0 {
+					t.Fatalf("result=%+v err=%v requests=%d", result, err, a.phoneRequests)
+				}
+				return
+			}
+			if err != nil || result.Source != "phone" || a.phoneRequests != 1 {
+				t.Fatalf("result=%+v err=%v requests=%d", result, err, a.phoneRequests)
+			}
+		})
+	}
+}

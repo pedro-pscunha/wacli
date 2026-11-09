@@ -208,8 +208,12 @@ func (a *App) retryMedia(ctx context.Context, opts RetryMediaOptions, exact *med
 			continue
 		}
 		// Pending batch queries enforce this metadata requirement themselves.
-		// An exact lookup also sees text-only or incomplete media rows.
-		if exact != nil && (strings.TrimSpace(info.MediaType) == "" || len(info.MediaKey) == 0 || strings.TrimSpace(info.DirectPath) == "") {
+		// An exact lookup also sees text-only or incomplete media rows. The
+		// phone's answer carries a fresh direct path, so a stored one is not
+		// needed: a row without one asks the phone like any other, if the
+		// phone's answer can be decrypted and checked (32-byte key and SHA-256).
+		noPath := strings.TrimSpace(info.DirectPath) == ""
+		if exact != nil && (strings.TrimSpace(info.MediaType) == "" || len(info.MediaKey) == 0 || (noPath && (len(info.MediaKey) != 32 || len(info.FileSHA256) != 32))) {
 			result.Failed++
 			result.Outcomes = append(result.Outcomes, MediaRetryOutcome{ChatJID: p.ChatJID, MsgID: p.MsgID, Status: "error", Detail: "message has no downloadable media metadata"})
 			continue
@@ -392,6 +396,9 @@ func (a *App) classifyRetry(ctx context.Context, info store.MediaDownloadInfo, i
 		out.Status = "error"
 		out.Detail = n.err.Error()
 		result.Failed++
+	case n.code == wa.MediaRetryNotFound && strings.TrimSpace(info.DirectPath) == "":
+		// No stored path means no server copy to try: the phone was the only source.
+		a.markMediaGone(ctx, info, id, &out, result, "phone has no copy")
 	case n.code == wa.MediaRetryNotFound:
 		// A phone may no longer hold media that is still available from the CDN.
 		// Try the stored path before permanently excluding this row from backfill.
@@ -407,14 +414,7 @@ func (a *App) classifyRetry(ctx context.Context, info store.MediaDownloadInfo, i
 			out.Detail = fmt.Sprintf("phone has no copy; direct download: %v", directErr)
 			result.Failed++
 		default:
-			if markErr := a.db.MarkMediaUnavailable(ctx, info.ChatJID, id, nowUTC()); markErr != nil {
-				out.Status = "error"
-				out.Detail = fmt.Sprintf("phone has no copy; mark unavailable: %v", markErr)
-				result.Failed++
-			} else {
-				out.Status = "not_on_phone"
-				result.NotOnPhone++
-			}
+			a.markMediaGone(ctx, info, id, &out, result, "phone has no copy")
 		}
 	case n.code != wa.MediaRetrySuccess || strings.TrimSpace(n.directPath) == "":
 		out.Status = "error"
@@ -434,6 +434,18 @@ func (a *App) classifyRetry(ctx context.Context, info store.MediaDownloadInfo, i
 		}
 	}
 	return out
+}
+
+// markMediaGone records that neither the phone nor the server holds the file, so pending queries skip the row.
+func (a *App) markMediaGone(ctx context.Context, info store.MediaDownloadInfo, id string, out *MediaRetryOutcome, result *MediaRetryResult, why string) {
+	if err := a.db.MarkMediaUnavailable(ctx, info.ChatJID, id, nowUTC()); err != nil {
+		out.Status = "error"
+		out.Detail = fmt.Sprintf("%s; mark unavailable: %v", why, err)
+		result.Failed++
+		return
+	}
+	out.Status = "not_on_phone"
+	result.NotOnPhone++
 }
 
 func isExpiredMediaDownload(err error) bool {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openclaw/wacli/internal/app"
@@ -144,6 +145,16 @@ func requireMediaMetadata(info store.MediaDownloadInfo) error {
 	return nil
 }
 
+// The phone answers a retry with a fresh direct path, so a row that never had one (an old history sync, a row
+// imported from another device's store) can still come back from the phone. It needs the media key that decrypts
+// the phone's answer and the file, and the file's SHA-256 that checks the re-uploaded bytes.
+func requirePhoneRecoverable(info store.MediaDownloadInfo) error {
+	if info.MediaType == "" || len(info.MediaKey) != 32 || len(info.FileSHA256) != 32 {
+		return fmt.Errorf("message has no direct path and no complete media key and SHA-256: the phone cannot serve it")
+	}
+	return nil
+}
+
 // This narrow boundary permits a protocol fake in tests while exercising the
 // real SQLite cache and output behavior used by both direct and owner requests.
 type exactMediaDownloadApp interface {
@@ -171,7 +182,14 @@ func executeExactMediaDownload(ctx context.Context, a exactMediaDownloadApp, cha
 	if hit {
 		return mediaResult(info, target, bytes, "cache"), nil
 	}
-	if err := requireMediaMetadata(info); err != nil {
+	// Without a direct path there is no server copy to try: only the phone can serve the file.
+	serverCopy := strings.TrimSpace(info.DirectPath) != ""
+	if retry && !serverCopy {
+		err = requirePhoneRecoverable(info)
+	} else {
+		err = requireMediaMetadata(info)
+	}
+	if err != nil {
 		return nil, err
 	}
 	client := a.WA()
@@ -180,9 +198,11 @@ func executeExactMediaDownload(ctx context.Context, a exactMediaDownloadApp, cha
 	if client == nil || !client.IsConnected() {
 		return nil, fmt.Errorf("sync owner is not connected for media download")
 	}
-	bytes, err = client.DownloadMediaToFile(ctx, info.DirectPath, info.FileEncSHA256, info.FileSHA256, info.MediaKey, info.FileLength, info.MediaType, "", target)
+	if serverCopy {
+		bytes, err = client.DownloadMediaToFile(ctx, info.DirectPath, info.FileEncSHA256, info.FileSHA256, info.MediaKey, info.FileLength, info.MediaType, "", target)
+	}
 	source := "server"
-	if err != nil && retry && app.IsExpiredMediaDownload(err) {
+	if retry && (!serverCopy || (err != nil && app.IsExpiredMediaDownload(err))) {
 		outcome, recoveryErr := a.RetryMediaMessage(ctx, chat, id, 30*time.Second)
 		if recoveryErr != nil {
 			return nil, fmt.Errorf("exact media recovery: %w", recoveryErr)
