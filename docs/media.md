@@ -22,7 +22,9 @@ failed verification never replaces a good output. Cache hits work without a
 writable session or store lock. JSON adds `source`: `cache`, `server` or `phone`.
 
 Add `--retry-on-phone` to recover this exact chat/message after a server download
-returns HTTP 403, 404 or 410. A running sync process handles recovery over its
+returns HTTP 403, 404 or 410. A message with a media key but no stored direct
+path (an old history sync, a row from `store import`) has no server copy to try,
+so it goes straight to the phone. A running sync process handles recovery over its
 existing local endpoint without pausing sync or blocking the chat-send queue.
 Otherwise the command uses its normal locked connection. Old daemons that do
 not support media delegation fail explicitly; they are never stopped as fallback.

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openclaw/wacli/internal/store"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -186,5 +187,39 @@ func TestRetryMediaMessageRejectsMissingSelector(t *testing.T) {
 	out, err := a.RetryMediaMessage(context.Background(), chat, "missing", time.Millisecond)
 	if err != nil || out.Status != "error" || len(f.mediaRetryReceipts) != 0 {
 		t.Fatalf("missing message outcome=%+v error=%v receipts=%v", out, err, f.mediaRetryReceipts)
+	}
+}
+
+// The phone's answer carries a fresh direct path, so a stored row without one still sends its receipt (a silent
+// phone is then a no_response, not a refusal). When the
+// phone has no copy there is no server copy to try either: the row is gone, and the server is never asked.
+func TestRetryMediaMessageWithoutDirectPath(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		hook         func(*types.MessageInfo, []byte) any
+	}{
+		{"phone-silent", "no_response", nil},
+		{"phone-gone", "not_on_phone", notOnPhoneHook},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t)
+			f := newFakeWA()
+			a.wa = f
+			chat := "111@s.whatsapp.net"
+			if err := a.db.UpsertChat(chat, "dm", "Synthetic", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.db.UpsertMessage(store.UpsertMessageParams{ChatJID: chat, MsgID: "old", SenderJID: chat, FromMe: true,
+				Timestamp: time.Now().Add(-time.Hour), MediaType: "image", MimeType: "image/jpeg", MediaKey: make([]byte, 32),
+				FileSHA256: []byte("sha"), FileEncSHA256: []byte("enc"), FileLength: 3}); err != nil {
+				t.Fatal(err)
+			}
+			f.onMediaRetry = tc.hook
+			f.downloadErr = errors.New("the server must not be asked")
+			out, err := a.RetryMediaMessage(context.Background(), chat, "old", time.Millisecond)
+			if err != nil || out.Status != tc.status || len(f.mediaRetryReceipts) != 1 {
+				t.Fatalf("outcome=%+v error=%v receipts=%v", out, err, f.mediaRetryReceipts)
+			}
+		})
 	}
 }

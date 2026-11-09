@@ -1,6 +1,7 @@
 # store
 
-Read when: inspecting local SQLite size/counts or pruning old local chat/group rows.
+Read when: inspecting local SQLite size/counts, pruning old local chat/group rows, or copying history from an old
+store of the same account.
 
 `wacli store` manages the selected account's local `wacli.db` mirror. Cleanup commands only delete local wacli cache/history rows; they do not delete WhatsApp chats, leave groups, or remove messages from WhatsApp servers.
 
@@ -9,6 +10,7 @@ Read when: inspecting local SQLite size/counts or pruning old local chat/group r
 ```bash
 wacli store stats
 wacli store cleanup [--days N] [--dry-run] [--confirm]
+wacli store import --from PATH [--dry-run]
 ```
 
 Related cleanup commands:
@@ -24,6 +26,12 @@ wacli groups prune [--days N] [--left-only=false|--include-active] [--dry-run] [
 - Status broadcasts are persisted separately in `status_messages`; they are not chat rows and are not included in normal chat/message cleanup paths.
 - What recipients report about your own messages is persisted in `message_receipts`, one row per recipient. The rows follow their chat through the SQLite cascade, so `store cleanup` and `chats cleanup` remove them with it.
 - Location pins are persisted in `message_locations`. Coordinates follow the same lifecycle as the rest of a message's local payload: `messages purge` removes them with the retained payload, `store cleanup` and `chats cleanup` remove them with their chat, and a LID-to-phone identity migration moves them with the message rather than leaving them under the old identity.
+- `store import --from PATH` copies from another store of the same account (an old device, a backup; PATH is its
+  `wacli.db` or its store directory) the chats and messages that this store does not hold, with their places. Use it
+  when an old device holds history that this device never received: this device can then search it, export it and
+  ask the phone for its files. It only adds rows: a chat or message that this store holds stays as it is, and a
+  second run copies nothing. The source opens read-only; local media paths are not copied. It is local maintenance:
+  stop the store's sync daemon first. The next sync start moves copied LID rows to their phone address.
 - `store cleanup` removes chats whose known local activity is older than `--days` and deletes their messages through the SQLite chat/message cascade.
 - `chats cleanup --jid JID` removes one local chat row and its local messages.
 - `groups prune` removes local group metadata plus the matching local chat/messages for pruned group JIDs.
