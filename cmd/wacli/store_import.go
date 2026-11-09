@@ -22,7 +22,8 @@ this store does not hold, with their places. A message needs to be in this store
 phone for its file, search it or export it.
 
 The import only adds rows: a chat or message that this store holds stays as it is, so a second run copies nothing.
-Hidden-user (@lid) addresses are resolved with this account's own LID map first, as sync does. The source opens
+Hidden-user (@lid) addresses are resolved with this account's own LID map first, as sync does; the target needs a
+linked device, and session.db is opened (never connected) to read that map. The source opens
 read-only. Local media paths are not copied, nor a message that this store purged. Nothing checks that the source
 belongs to this account: name the target with --account. Stop the sync daemon of this store and back up its
 wacli.db first: the import is local maintenance and takes the store lock. --from takes the source's wacli.db or its

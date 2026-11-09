@@ -131,7 +131,7 @@ func TestImportFromResolvesHiddenUserAddresses(t *testing.T) {
 		mustDo(t, old.UpsertChat(lid, "dm", "", importAt))
 		mustDo(t, old.UpsertChat(unknown, "dm", "", importAt))
 		mustDo(t, old.UpsertMessage(UpsertMessageParams{ChatJID: lid, MsgID: "HELD", SenderJID: lid, Timestamp: importAt, Text: "old copy", Revoked: true}))
-		mustDo(t, old.UpsertMessage(UpsertMessageParams{ChatJID: lid, MsgID: "NEW", SenderJID: lid, Timestamp: importAt, Text: "only there"}))
+		mustDo(t, old.UpsertMessage(UpsertMessageParams{ChatJID: lid, MsgID: "NEW", SenderJID: lid, QuotedMsgID: "HELD", QuotedSenderJID: lid, Timestamp: importAt, Text: "only there"}))
 		mustDo(t, old.UpsertMessageLocation(MessageLocation{ChatJID: lid, MsgID: "NEW", Latitude: 1, Longitude: 2}))
 		mustDo(t, old.UpsertMessage(UpsertMessageParams{ChatJID: unknown, MsgID: "LID", Timestamp: importAt, Text: "no number yet"}))
 	})
@@ -152,7 +152,7 @@ func TestImportFromResolvesHiddenUserAddresses(t *testing.T) {
 		t.Fatalf("the held message changed: %+v, %v", held, err)
 	}
 	moved, err := db.GetMessage(pn, "NEW")
-	if err != nil || moved.SenderJID != pn {
+	if err != nil || moved.SenderJID != pn || moved.QuotedSenderJID != pn {
 		t.Fatalf("copied under the hidden address: %+v, %v", moved, err)
 	}
 	if _, err := db.GetMessageLocation(pn, "NEW"); err != nil {
@@ -160,6 +160,29 @@ func TestImportFromResolvesHiddenUserAddresses(t *testing.T) {
 	}
 	if n := countRows(t, db.sql, `SELECT count(*) FROM chats WHERE jid = ?`, lid); n != 0 {
 		t.Fatal("a resolved hidden-user chat was copied")
+	}
+}
+
+// An @lid chat and its phone-number chat in the same source become one chat here, and the phone-number copy decides.
+func TestImportFromCollapsesTwoSourceChatsIntoOne(t *testing.T) {
+	lid, pn := "99990000001@lid", "15550000001@s.whatsapp.net"
+	oldPath := newSourceStore(t, func(old *DB) {
+		mustDo(t, old.UpsertChat(lid, "unknown", "lid name", importAt))
+		mustDo(t, old.UpsertMessage(UpsertMessageParams{ChatJID: lid, MsgID: "SAME", Timestamp: importAt, Text: "lid copy"}))
+		mustDo(t, old.UpsertChat(pn, "dm", "Ana", importAt))
+		mustDo(t, old.UpsertMessage(UpsertMessageParams{ChatJID: pn, MsgID: "SAME", Timestamp: importAt, Text: "number copy"}))
+	})
+	db := openTestDB(t)
+	got, err := db.ImportFrom(context.Background(), oldPath, ImportOptions{Canonical: func(jid string) string { return strings.Replace(jid, lid, pn, 1) }})
+	if err != nil || got.Chats != 1 || got.Messages != 1 || got.Existing != 1 {
+		t.Fatalf("import = %+v, %v", got, err)
+	}
+	msg, err := db.GetMessage(pn, "SAME")
+	if err != nil || msg.Text != "number copy" {
+		t.Fatalf("the @lid copy won: %+v, %v", msg, err)
+	}
+	if n := countRows(t, db.sql, `SELECT count(*) FROM chats WHERE jid = ? AND name = 'Ana' AND kind = 'dm'`, pn); n != 1 {
+		t.Fatal("the @lid chat decided the name or kind")
 	}
 }
 
@@ -182,8 +205,11 @@ func TestImportFromNeverBringsBackAPurgedMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Messages != 0 || got.Purged != 1 {
+	if got.Messages != 0 || got.Purged != 1 || got.Chats != 0 {
 		t.Fatalf("import = %+v", got)
+	}
+	if n := countRows(t, db.sql, `SELECT count(*) FROM chats WHERE jid = ?`, chat); n != 0 {
+		t.Fatal("a chat came back empty")
 	}
 	if n := countRows(t, db.sql, `SELECT count(*) FROM messages WHERE msg_id = 'PURGED'`); n != 0 {
 		t.Fatal("a purged message came back")

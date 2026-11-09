@@ -69,10 +69,11 @@ func (d *DB) ImportFrom(ctx context.Context, sourcePath string, opts ImportOptio
 	// search index as a row that sync wrote.
 	target := &DB{path: d.path, sql: d.sql, q: d.q.WithTx(tx), ftsEnabled: d.ftsEnabled, receiptsEnabled: d.receiptsEnabled}
 
-	if result.Chats, err = importChats(ctx, src, tx, target, canonical); err != nil {
+	chats, err := sourceChats(ctx, src, tx, canonical)
+	if err != nil {
 		return result, err
 	}
-	copied, err := importMessages(ctx, src, tx, target, canonical, &result)
+	copied, err := importMessages(ctx, src, tx, target, canonical, chats, &result)
 	if err != nil {
 		return result, err
 	}
@@ -101,50 +102,55 @@ func (d *DB) refuseSameFile(sourcePath string) error {
 	return nil
 }
 
-func importChats(ctx context.Context, src *DB, tx *sql.Tx, target *DB, canonical func(string) string) (int, error) {
-	rows, err := src.sql.QueryContext(ctx, `SELECT jid, kind, COALESCE(name,''), COALESCE(last_message_ts,0) FROM chats`)
+type sourceChat struct {
+	kind, name string
+	last       int64
+}
+
+// sourceChats reads the source's chats that this store lacks, under their canonical address. A chat is created only
+// when its first message is copied, so a chat whose messages are all held or purged here does not come back empty.
+// Phone-number rows come first: when an @lid chat and its phone-number chat both exist in the source, the
+// phone-number one decides the name and kind.
+func sourceChats(ctx context.Context, src *DB, tx *sql.Tx, canonical func(string) string) (map[string]sourceChat, error) {
+	rows, err := src.sql.QueryContext(ctx, `SELECT jid, kind, COALESCE(name,''), COALESCE(last_message_ts,0) FROM chats
+		ORDER BY jid GLOB '*@lid', rowid`)
 	if err != nil {
-		return 0, fmt.Errorf("read source chats: %w", err)
+		return nil, fmt.Errorf("read source chats: %w", err)
 	}
 	defer rows.Close()
-	copied := 0
+	missing := map[string]sourceChat{}
 	for rows.Next() {
-		var jid, kind, name string
-		var last int64
-		if err := rows.Scan(&jid, &kind, &name, &last); err != nil {
-			return copied, err
+		var jid string
+		var c sourceChat
+		if err := rows.Scan(&jid, &c.kind, &c.name, &c.last); err != nil {
+			return nil, err
 		}
 		jid = canonical(jid)
-		held, err := exists(ctx, tx, `SELECT 1 FROM chats WHERE jid = ?`, jid)
-		if err != nil {
-			return copied, err
-		}
-		if held {
+		if _, seen := missing[jid]; seen {
 			continue
 		}
-		var lastTS time.Time
-		if last > 0 {
-			lastTS = time.Unix(last, 0).UTC()
+		held, err := exists(ctx, tx, `SELECT 1 FROM chats WHERE jid = ?`, jid)
+		if err != nil {
+			return nil, err
 		}
-		if err := target.UpsertChat(jid, kind, name, lastTS); err != nil {
-			return copied, fmt.Errorf("copy chat %s: %w", jid, err)
+		if !held {
+			missing[jid] = c
 		}
-		copied++
 	}
-	return copied, rows.Err()
+	return missing, rows.Err()
 }
 
 // A copied message: its key in the source (for its place) and in this store.
 type messageKey struct{ srcChat, chat, id string }
 
-func importMessages(ctx context.Context, src *DB, tx *sql.Tx, target *DB, canonical func(string) string, result *ImportResult) ([]messageKey, error) {
+func importMessages(ctx context.Context, src *DB, tx *sql.Tx, target *DB, canonical func(string) string, chats map[string]sourceChat, result *ImportResult) ([]messageKey, error) {
 	rows, err := src.sql.QueryContext(ctx, `SELECT chat_jid, COALESCE(chat_name,''), msg_id, COALESCE(sender_jid,''),
 		COALESCE(sender_name,''), ts, from_me, COALESCE(text,''), COALESCE(display_text,''), COALESCE(quoted_msg_id,''),
 		COALESCE(quoted_sender_jid,''), COALESCE(buttons,''), is_forwarded, forwarding_score, COALESCE(reaction_to_id,''),
 		COALESCE(reaction_emoji,''), COALESCE(media_type,''), COALESCE(media_caption,''), COALESCE(filename,''),
 		COALESCE(mime_type,''), COALESCE(direct_path,''), media_key, file_sha256, file_enc_sha256,
 		COALESCE(file_length,0), edited, revoked, deleted_for_me, COALESCE(deleted_at,0), COALESCE(deletion_reason,'')
-		FROM messages ORDER BY rowid`)
+		FROM messages ORDER BY chat_jid GLOB '*@lid', rowid`)
 	if err != nil {
 		return nil, fmt.Errorf("read source messages: %w", err)
 	}
@@ -201,6 +207,17 @@ func importMessages(ctx context.Context, src *DB, tx *sql.Tx, target *DB, canoni
 		}
 		if deletedAt > 0 {
 			p.DeletedAt = time.Unix(deletedAt, 0).UTC()
+		}
+		if c, missing := chats[p.ChatJID]; missing {
+			var lastTS time.Time
+			if c.last > 0 {
+				lastTS = time.Unix(c.last, 0).UTC()
+			}
+			if err := target.UpsertChat(p.ChatJID, c.kind, c.name, lastTS); err != nil {
+				return copied, fmt.Errorf("copy chat %s: %w", p.ChatJID, err)
+			}
+			delete(chats, p.ChatJID)
+			result.Chats++
 		}
 		if err := target.UpsertMessage(p); err != nil {
 			return copied, fmt.Errorf("copy message %s/%s: %w", p.ChatJID, p.MsgID, err)

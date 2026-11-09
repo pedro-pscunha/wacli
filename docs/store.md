@@ -35,16 +35,21 @@ wacli groups prune [--days N] [--left-only=false|--include-active] [--dry-run] [
   - Hidden-user (`@lid`) chat, sender and quoted-sender addresses are resolved with this account's own LID map first,
     as sync does, so a copied row is never a second copy of a message this store holds under the phone number.
     `unresolved_lid` counts copied messages whose chat stays `@lid`; the LID migration at a later sync start moves
-    them when it learns the number.
+    them when it learns the number, and can then merge them into a held phone-number chat. Import only when the dry
+    run shows `unresolved_lid` 0, or when those chats have no phone-number chat here. The target needs a linked
+    device (its LID map is in `session.db`); a store without one is refused. When an `@lid` chat and its phone-number
+    chat are both in the source, they become one chat and the phone-number copy decides; the second copy of a
+    message counts as `existing`. A chat is created only with its first copied message.
   - Not copied: local media paths (they name files on the other device), a message that this store purged
     (`purged` counts them), polls, votes, stars, receipts and group metadata, and a chat's archive, pin, mute and
     unread state. A held chat keeps its name, kind and last activity. An edited message's edit time becomes its
     message time.
   - Nothing checks that the source belongs to this account (a logged-out store has no device): name the target with
     `--account`, and read `store` and `source` in the output.
-  - Order: stop the store's sync daemon (the import is local maintenance and takes the store lock), back up
-    `wacli.db` (`sqlite3 wacli.db ".backup <file>"`), run with `--dry-run`, run it, check
-    `PRAGMA integrity_check`, start the daemon. Copy a live source the same way (`.backup` or `VACUUM INTO`): a copy
+  - Order: install the binary that the daemon will run, stop the store's sync daemon (the import is local
+    maintenance and takes the store lock), back up `wacli.db` and `session.db` (`sqlite3 wacli.db ".backup <file>"`),
+    run with `--dry-run`, run it, check `PRAGMA integrity_check`, start the daemon. The import never connects, but it
+    opens `session.db` to read the LID map, and this binary's whatsmeow can upgrade that file's schema. Copy a live source the same way (`.backup` or `VACUUM INTO`): a copy
     without its `-wal` file loses the pages that the WAL still holds, with no error.
   - After an import, never run `media backfill` or `media retry` without `--chat` or `--limit`: every copied media row
     with an expired direct path counts as pending there, and a retry of all of them sends one receipt each to the

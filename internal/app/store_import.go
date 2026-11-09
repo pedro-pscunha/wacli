@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/openclaw/wacli/internal/store"
 )
@@ -13,6 +14,11 @@ import (
 func (a *App) ImportStore(ctx context.Context, source string, dryRun bool) (store.ImportResult, error) {
 	if err := a.OpenWA(); err != nil {
 		return store.ImportResult{}, err
+	}
+	// Without a linked device session.db holds no LID map, and every hidden-user address would stay unresolved
+	// without a word: a wrong --store, or a logged-out store as the target.
+	if a.wa.LinkedJID() == "" {
+		return store.ImportResult{}, fmt.Errorf("this store has no linked device, so its LID map is empty: import into the live store of the account")
 	}
 	return a.db.ImportFrom(ctx, source, store.ImportOptions{
 		DryRun:    dryRun,

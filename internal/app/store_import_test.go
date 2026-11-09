@@ -43,3 +43,14 @@ func TestImportStoreUsesThisAccountsLIDMap(t *testing.T) {
 		t.Fatalf("not stored under the phone number: %+v, %v", msg, err)
 	}
 }
+
+// A store without a linked device has no LID map: the import refuses instead of leaving every @lid unresolved.
+func TestImportStoreRefusesAStoreWithoutDevice(t *testing.T) {
+	a := newTestApp(t)
+	f := newFakeWA()
+	f.authed = false
+	a.wa = f
+	if _, err := a.ImportStore(context.Background(), filepath.Join(t.TempDir(), "wacli.db"), true); err == nil {
+		t.Fatal("an import into a store without a device was accepted")
+	}
+}
