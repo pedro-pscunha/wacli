@@ -147,10 +147,10 @@ func requireMediaMetadata(info store.MediaDownloadInfo) error {
 
 // The phone answers a retry with a fresh direct path, so a row that never had one (an old history sync, a row
 // imported from another device's store) can still come back from the phone. It needs the media key that decrypts
-// the phone's answer and the file.
+// the phone's answer and the file, and the file's SHA-256 that checks the re-uploaded bytes.
 func requirePhoneRecoverable(info store.MediaDownloadInfo) error {
-	if info.MediaType == "" || len(info.MediaKey) == 0 {
-		return fmt.Errorf("message has no downloadable media metadata (run `wacli sync` first)")
+	if info.MediaType == "" || len(info.MediaKey) != 32 || len(info.FileSHA256) != 32 {
+		return fmt.Errorf("message has no direct path and no complete media key and SHA-256: the phone cannot serve it")
 	}
 	return nil
 }

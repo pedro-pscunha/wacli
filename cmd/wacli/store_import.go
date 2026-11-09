@@ -22,8 +22,14 @@ this store does not hold, with their places. A message needs to be in this store
 phone for its file, search it or export it.
 
 The import only adds rows: a chat or message that this store holds stays as it is, so a second run copies nothing.
-The source opens read-only. Local media paths are not copied. Stop the sync daemon of this store first: the import
-is local maintenance and takes the store lock. --from takes the source's wacli.db or its store directory.`,
+Hidden-user (@lid) addresses are resolved with this account's own LID map first, as sync does. The source opens
+read-only. Local media paths are not copied, nor a message that this store purged. Nothing checks that the source
+belongs to this account: name the target with --account. Stop the sync daemon of this store and back up its
+wacli.db first: the import is local maintenance and takes the store lock. --from takes the source's wacli.db or its
+store directory; copy a live source with sqlite's backup (or VACUUM INTO), never without its -wal file.
+
+After an import, never run "media backfill" or "media retry" without --chat or --limit: every copied media row with
+an expired path counts as pending there.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := flags.requireWritable(); err != nil {
 				return err
@@ -44,7 +50,7 @@ is local maintenance and takes the store lock. --from takes the source's wacli.d
 			}
 			defer closeApp(a, lk)
 
-			result, err := a.DB().ImportFrom(ctx, source, dryRun)
+			result, err := a.ImportStore(ctx, source, dryRun)
 			if err != nil {
 				return err
 			}
@@ -55,8 +61,12 @@ is local maintenance and takes the store lock. --from takes the source's wacli.d
 			if dryRun {
 				verb = "Would copy"
 			}
-			fmt.Fprintf(os.Stdout, "%s %d chat(s), %d message(s) and %d place(s); %d message(s) were already here.\n",
-				verb, result.Chats, result.Messages, result.Locations, result.Existing)
+			fmt.Fprintf(os.Stdout, "From %s into %s:\n", result.Source, result.Store)
+			fmt.Fprintf(os.Stdout, "%s %d chat(s), %d message(s) and %d place(s); %d message(s) were already here, %d purged here.\n",
+				verb, result.Chats, result.Messages, result.Locations, result.Existing, result.Purged)
+			if result.Unresolved > 0 {
+				fmt.Fprintf(os.Stdout, "%d copied message(s) stay under an @lid chat: this account does not know its phone number yet.\n", result.Unresolved)
+			}
 			return nil
 		},
 	}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -211,7 +212,7 @@ func TestRetryMediaMessageWithoutDirectPath(t *testing.T) {
 			}
 			if err := a.db.UpsertMessage(store.UpsertMessageParams{ChatJID: chat, MsgID: "old", SenderJID: chat, FromMe: true,
 				Timestamp: time.Now().Add(-time.Hour), MediaType: "image", MimeType: "image/jpeg", MediaKey: make([]byte, 32),
-				FileSHA256: []byte("sha"), FileEncSHA256: []byte("enc"), FileLength: 3}); err != nil {
+				FileSHA256: make([]byte, 32), FileEncSHA256: make([]byte, 32), FileLength: 3}); err != nil {
 				t.Fatal(err)
 			}
 			f.onMediaRetry = tc.hook
@@ -220,6 +221,50 @@ func TestRetryMediaMessageWithoutDirectPath(t *testing.T) {
 			if err != nil || out.Status != tc.status || len(f.mediaRetryReceipts) != 1 {
 				t.Fatalf("outcome=%+v error=%v receipts=%v", out, err, f.mediaRetryReceipts)
 			}
+			if marked := mediaUnavailable(t, a, chat, "old"); marked != (tc.status == "not_on_phone") {
+				t.Fatalf("media_unavailable_at set = %v for %s", marked, tc.status)
+			}
 		})
 	}
+}
+
+// Without a direct path the phone is the only source, and its answer is useless without the full key and hash.
+func TestRetryMediaMessageWithoutDirectPathNeedsTheFullKeyAndHash(t *testing.T) {
+	for name, row := range map[string]store.UpsertMessageParams{
+		"short-key": {MediaKey: make([]byte, 16), FileSHA256: make([]byte, 32)},
+		"no-sha":    {MediaKey: make([]byte, 32)},
+		"short-sha": {MediaKey: make([]byte, 32), FileSHA256: []byte("sha")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newTestApp(t)
+			f := newFakeWA()
+			a.wa = f
+			chat := "111@s.whatsapp.net"
+			if err := a.db.UpsertChat(chat, "dm", "Synthetic", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			row.ChatJID, row.MsgID, row.SenderJID, row.Timestamp, row.MediaType = chat, "old", chat, time.Now(), "image"
+			if err := a.db.UpsertMessage(row); err != nil {
+				t.Fatal(err)
+			}
+			out, _ := a.RetryMediaMessage(context.Background(), chat, "old", time.Millisecond)
+			if out.Status != "error" || len(f.mediaRetryReceipts) != 0 {
+				t.Fatalf("outcome=%+v receipts=%v", out, f.mediaRetryReceipts)
+			}
+		})
+	}
+}
+
+func mediaUnavailable(t *testing.T, a *App, chat, id string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(a.opts.StoreDir, "wacli.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var at sql.NullInt64
+	if err := db.QueryRow(`SELECT media_unavailable_at FROM messages WHERE chat_jid = ? AND msg_id = ?`, chat, id).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at.Valid
 }

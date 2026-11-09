@@ -249,7 +249,7 @@ func newMediaDownloadCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&chat, "chat", "", "chat JID")
 	cmd.Flags().StringVar(&id, "id", "", "message ID")
 	cmd.Flags().StringVar(&outputPath, "output", "", "output file or directory (default: store media dir)")
-	cmd.Flags().BoolVar(&retryOnPhone, "retry-on-phone", false, "recover this exact message from the phone after HTTP 403, 404 or 410 (writable only)")
+	cmd.Flags().BoolVar(&retryOnPhone, "retry-on-phone", false, "recover this exact message from the phone after HTTP 403, 404 or 410, or at once when it has no stored direct path (writable only)")
 	_ = cmd.MarkFlagRequired("chat")
 	_ = cmd.MarkFlagRequired("id")
 	return cmd

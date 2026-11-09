@@ -210,8 +210,10 @@ func (a *App) retryMedia(ctx context.Context, opts RetryMediaOptions, exact *med
 		// Pending batch queries enforce this metadata requirement themselves.
 		// An exact lookup also sees text-only or incomplete media rows. The
 		// phone's answer carries a fresh direct path, so a stored one is not
-		// needed: a row without one asks the phone like any other.
-		if exact != nil && (strings.TrimSpace(info.MediaType) == "" || len(info.MediaKey) == 0) {
+		// needed: a row without one asks the phone like any other, if the
+		// phone's answer can be decrypted and checked (32-byte key and SHA-256).
+		noPath := strings.TrimSpace(info.DirectPath) == ""
+		if exact != nil && (strings.TrimSpace(info.MediaType) == "" || len(info.MediaKey) == 0 || (noPath && (len(info.MediaKey) != 32 || len(info.FileSHA256) != 32))) {
 			result.Failed++
 			result.Outcomes = append(result.Outcomes, MediaRetryOutcome{ChatJID: p.ChatJID, MsgID: p.MsgID, Status: "error", Detail: "message has no downloadable media metadata"})
 			continue
